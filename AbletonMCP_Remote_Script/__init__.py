@@ -66,6 +66,9 @@ VALID_COMMANDS = frozenset({
     "ensure_drum_rack_on_track",
     "verify_drum_pad_loaded",
     "wait_for_load_complete",
+    # B10/B11 — fork-only browser-by-name + filepath resolution (hardcoded paths, NOT for upstream)
+    "load_browser_sample_by_name",
+    "resolve_filepath_to_browser_path",
     # F6 — fork-only probes (NOT submitted upstream; kept local for diagnostics)
     "probe_environment",
     "probe_export_capabilities",
@@ -84,7 +87,16 @@ def create_instance(c_instance):
 
 class AbletonMCP(ControlSurface):
     """AbletonMCP Remote Script for Ableton Live"""
-    
+
+    # Fork-only: maps host/container filepath prefixes to Live browser roots.
+    # Hardcoded for this OCP setup — not upstream-ready (needs param injection).
+    _FILEPATH_BROWSER_MAPPING = [
+        ("/ocp/mnt/_lib_", "User_folders/_lib_"),
+        ("/Users/user/Documents/_lib_", "User_folders/_lib_"),
+        ("/ocp/mnt/Splice", "User_folders/Splice"),
+        ("/Users/user/Splice", "User_folders/Splice"),
+    ]
+
     def __init__(self, c_instance):
         """Initialize the control surface"""
         ControlSurface.__init__(self, c_instance)
@@ -478,6 +490,18 @@ class AbletonMCP(ControlSurface):
                             pn = params.get("pad_note", 36)
                             max_ticks = params.get("max_ticks", 20)
                             result = self._wait_for_load_complete(ti, rdi, pn, max_ticks)
+                        elif command_type == "load_browser_sample_by_name":
+                            ti = params.get("track_index", 0)
+                            rdi = params.get("rack_device_index", 0)
+                            pn = params.get("pad_note", 36)
+                            filename = params.get("filename", "")
+                            search_root = params.get("search_root", "User_folders/Splice")
+                            replace = params.get("replace", False)
+                            result = self._load_browser_sample_by_name(
+                                ti, rdi, pn, filename, search_root, replace)
+                        elif command_type == "resolve_filepath_to_browser_path":
+                            fp = params.get("filepath", "")
+                            result = {"browser_path": self._resolve_filepath_to_browser_path(fp)}
                         elif command_type == "probe_environment":
                             result = self._probe_environment()
                         elif command_type == "probe_export_capabilities":
@@ -942,6 +966,107 @@ class AbletonMCP(ControlSurface):
         if not item:
             raise ValueError("Browser item with URI '{0}' not found".format(item_uri))
         return self._load_item_to_drum_pad_locked(track_index, rack_device_index, pad_note, item, replace)
+
+    # ----- Fork-only: name-based browser-sample lookup (B10) -----
+
+    def _find_browser_item_by_name_under_path(self, search_root, filename, max_depth=12):
+        """Find a loadable browser item by exact filename under a browser path.
+
+        Fork-only. Hardcoded to walk only User_folders/_lib_ or
+        User_folders/Splice — for upstream a config-driven valid_roots list is
+        needed (deferred per PRIORITY.md B10).
+        """
+        if not filename:
+            raise ValueError("filename is required")
+        if search_root not in ("User_folders/_lib_", "User_folders/Splice"):
+            raise ValueError("invalid_search_root: {0}".format(search_root))
+
+        app = self.application()
+        filename_lower = filename.lower()
+        path_parts = [p for p in search_root.split("/") if p]
+
+        def _item_name(item):
+            if hasattr(item, 'name') and item.name:
+                return item.name
+            return ""
+
+        def _children(item):
+            return self._browser_children(item)
+
+        def _user_folder_roots():
+            roots = []
+            try:
+                uf = app.browser.user_folders
+            except Exception:
+                return roots
+            for idx in range(128):
+                try:
+                    roots.append(uf[idx])
+                except Exception:
+                    break
+            return roots
+
+        current_item = None
+        current_children = []
+        if path_parts and path_parts[0].lower() == "user_folders":
+            current_children = _user_folder_roots()
+            for part in path_parts[1:]:
+                found = None
+                candidates = current_children if current_item is None else _children(current_item)
+                for child in candidates:
+                    if _item_name(child).lower() == part.lower():
+                        found = child
+                        break
+                if found is None:
+                    raise ValueError("Search root part '{0}' not found in {1}".format(part, search_root))
+                current_item = found
+                current_children = _children(current_item)
+        else:
+            raise ValueError("Unsupported search root: {0}".format(search_root))
+
+        def _search(node, depth):
+            if node is None or depth < 0:
+                return None
+            try:
+                name = _item_name(node)
+                if name.lower() == filename_lower:
+                    if hasattr(node, 'is_loadable') and node.is_loadable:
+                        return node
+                for child in _children(node):
+                    found = _search(child, depth - 1)
+                    if found is not None:
+                        return found
+            except Exception:
+                return None
+            return None
+
+        return _search(current_item, max_depth)
+
+    def _load_browser_sample_by_name(self, track_index, rack_device_index, pad_note,
+                                     filename, search_root="User_folders/Splice",
+                                     replace=False):
+        """Load a sample from User_folders/_lib_ or User_folders/Splice by filename.
+
+        Fork-only; uses _find_browser_item_by_name_under_path which is locked to
+        the two hardcoded search roots above. See B10 in PRIORITY.md for the
+        upstream-ready rework.
+        """
+        try:
+            item = self._find_browser_item_by_name_under_path(search_root, filename)
+            if item is None:
+                raise ValueError("Browser sample '{0}' not found under {1}".format(filename, search_root))
+            if not hasattr(item, 'uri') or not item.uri:
+                raise ValueError("Browser sample '{0}' has no URI".format(filename))
+            # Skip redundant URI lookup; we already have the item from name search.
+            result = self._load_item_to_drum_pad_locked(
+                track_index, rack_device_index, pad_note, item, replace)
+            result["search_root"] = search_root
+            result["filename"] = filename
+            return result
+        except Exception as e:
+            self.log_message("Error loading browser sample by name: {0}".format(str(e)))
+            self.log_message(traceback.format_exc())
+            raise
 
     def _ensure_drum_rack_on_track(self, track_index=-1, name="", create_if_missing=True):
         """Idempotently ensure a Drum Rack exists on a MIDI track."""
@@ -2725,7 +2850,31 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error loading browser item: {0}".format(str(e)))
             self.log_message(traceback.format_exc())
             raise
-    
+
+    def _resolve_filepath_to_browser_path(self, filepath):
+        """Map a container/host filepath to an Ableton browser path.
+
+        Fork-only. Only /ocp/mnt/_lib_ and /ocp/mnt/Splice (and their host
+        equivalents in _FILEPATH_BROWSER_MAPPING) are supported. Any other
+        prefix raises ValueError with typed error.
+        """
+        if not filepath:
+            raise ValueError("empty_path: filepath must not be empty")
+
+        # Normalize trailing slash
+        fp = filepath.rstrip("/")
+        for prefix, browser_root in self._FILEPATH_BROWSER_MAPPING:
+            if fp == prefix:
+                return browser_root
+            if fp.startswith(prefix + "/"):
+                rel = fp[len(prefix) + 1:]
+                return "{0}/{1}".format(browser_root, rel)
+
+        raise ValueError(
+            "unsupported_prefix: '{0}' is not under a supported mount. "
+            "Supported: /ocp/mnt/_lib_, /ocp/mnt/Splice".format(filepath)
+        )
+
     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
         """Find a browser item by its URI across all load-relevant roots.
 
@@ -3696,7 +3845,110 @@ class AbletonMCP(ControlSurface):
                 raise ValueError("Invalid path")
             
             # Determine the root category
-            root_category = path_parts[0]
+            root_category = path_parts[0].lower()
+
+            # Fork-only (B12): special-case user_folders because the generic
+            # _resolve_browser_root_category falls back to getattr(browser,
+            # 'user_folders'), and direct iteration of that Live vector can
+            # close the Live TCP connection. Use safe range-indexed iteration
+            # instead and return early.
+            if root_category == "user_folders":
+                try:
+                    uf = app.browser.user_folders
+                except Exception as e:
+                    self.log_message("Error accessing user_folders browser vector: {0}".format(str(e)))
+                    uf = None
+
+                def _item_children(item):
+                    return self._browser_children(item)
+
+                def _item_name(item, fallback):
+                    if hasattr(item, 'name') and item.name:
+                        return item.name
+                    return fallback
+
+                def _user_folder_roots():
+                    roots = []
+                    if uf is None:
+                        return roots
+                    for idx in range(128):
+                        try:
+                            child = uf[idx]
+                        except Exception:
+                            break
+                        roots.append(child)
+                    return roots
+
+                roots = _user_folder_roots()
+
+                def _user_folder_child_info(child):
+                    return {
+                        "name": _item_name(child, "Unknown"),
+                        "is_folder": bool(self._browser_children(child)),
+                        "is_device": hasattr(child, 'is_device') and child.is_device,
+                        "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
+                        "uri": child.uri if hasattr(child, 'uri') else None
+                    }
+
+                if len(path_parts) == 1 and path_parts[0].lower() == "user_folders":
+                    result = {
+                        "path": path,
+                        "name": "User_folders",
+                        "uri": None,
+                        "is_folder": bool(roots),
+                        "is_device": False,
+                        "is_loadable": False,
+                        "items": [_user_folder_child_info(child) for child in roots]
+                    }
+                    self.log_message("Retrieved {0} items at path: {1}".format(len(result['items']), path))
+                    return result
+
+                current_item = None
+                current_children = roots
+                for i in range(1, len(path_parts)):
+                    part = path_parts[i]
+                    if not part:
+                        continue
+
+                    found = False
+                    candidates = current_children if current_item is None else self._browser_children(current_item)
+                    for child in candidates:
+                        if _item_name(child, '').lower() == part.lower():
+                            current_item = child
+                            current_children = self._browser_children(child)
+                            found = True
+                            break
+
+                    if not found:
+                        return {
+                            "path": path,
+                            "error": "Path part '{0}' not found".format(part),
+                            "items": []
+                        }
+
+                items = []
+                for child in self._browser_children(current_item):
+                    item_info = {
+                        "name": _item_name(child, "Unknown"),
+                        "is_folder": bool(self._browser_children(child)),
+                        "is_device": hasattr(child, 'is_device') and child.is_device,
+                        "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
+                        "uri": child.uri if hasattr(child, 'uri') else None
+                    }
+                    items.append(item_info)
+
+                result = {
+                    "path": path,
+                    "name": _item_name(current_item, path_parts[-1] if path_parts else path),
+                    "uri": current_item.uri if hasattr(current_item, 'uri') else None,
+                    "is_folder": bool(self._browser_children(current_item)),
+                    "is_device": hasattr(current_item, 'is_device') and current_item.is_device,
+                    "is_loadable": hasattr(current_item, 'is_loadable') and current_item.is_loadable,
+                    "items": items
+                }
+                self.log_message("Retrieved {0} items at path: {1}".format(len(items), path))
+                return result
+
             current_item, resolved_root = self._resolve_browser_root_category(
                 app.browser, root_category, browser_attrs
             )

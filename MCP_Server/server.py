@@ -842,6 +842,61 @@ def wait_for_load_complete(
 
 
 @mcp.tool()
+def load_browser_sample_by_name(
+    ctx: Context,
+    track_index: int,
+    filename: str,
+    search_root: str,
+    pad_note: int = 36,
+    rack_device_index: int = 1,
+    replace: bool = False,
+) -> str:
+    """Load a Splice/_lib_ sample onto a Drum Rack pad by filename.
+
+    Fork-only: search_root MUST be 'User_folders/_lib_' or 'User_folders/Splice'.
+    Hardcoded paths — see B10 in PRIORITY.md for upstream rework.
+    """
+    valid_roots = {"User_folders/_lib_", "User_folders/Splice"}
+    if search_root not in valid_roots:
+        return f"Error: invalid_search_root '{search_root}'. Must be one of {valid_roots}"
+    try:
+        ableton = get_ableton_connection()
+        ti = _to_zero_based(track_index, "track_index")
+        rdi = _to_zero_based(rack_device_index, "rack_device_index")
+        result = ableton.send_command("load_browser_sample_by_name", {
+            "track_index": ti,
+            "rack_device_index": rdi,
+            "pad_note": pad_note,
+            "filename": filename,
+            "search_root": search_root,
+            "replace": replace,
+        })
+        return f"Loaded sample '{filename}' to pad {pad_note} on track {track_index}: {result}"
+    except Exception as e:
+        logger.error(f"Error loading sample by name: {str(e)}")
+        return f"Error loading sample by name: {str(e)}"
+
+
+@mcp.tool()
+def resolve_filepath_to_browser_path(ctx: Context, filepath: str) -> str:
+    """Convert a supported container/host sample filepath to an Ableton browser path.
+
+    Fork-only: supported prefixes are hardcoded in the Remote Script's
+    _FILEPATH_BROWSER_MAPPING (`/ocp/mnt/_lib_`, `/ocp/mnt/Splice`, plus their
+    macOS host equivalents). See B11 in PRIORITY.md for upstream rework.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("resolve_filepath_to_browser_path", {
+            "filepath": filepath,
+        })
+        return f"Resolved browser path: {result}"
+    except Exception as e:
+        logger.error(f"Error resolving browser path: {str(e)}")
+        return f"Error resolving browser path: {str(e)}"
+
+
+@mcp.tool()
 def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Start playing a clip.
