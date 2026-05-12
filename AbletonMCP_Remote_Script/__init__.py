@@ -61,6 +61,11 @@ VALID_COMMANDS = frozenset({
     "set_track_panning",
     # B7 — sample loading
     "load_sample_to_simpler",
+    # B8 — Drum Rack pad family
+    "load_sample_to_drum_pad",
+    "ensure_drum_rack_on_track",
+    "verify_drum_pad_loaded",
+    "wait_for_load_complete",
 })
 
 def create_instance(c_instance):
@@ -439,6 +444,30 @@ class AbletonMCP(ControlSurface):
                             item_uri = params.get("item_uri", "")
                             di = params.get("device_index", None)
                             result = self._load_sample_to_simpler(ti, item_uri, di)
+                        elif command_type == "load_sample_to_drum_pad":
+                            ti = params.get("track_index", 0)
+                            rdi = params.get("rack_device_index", 0)
+                            pn = params.get("pad_note", 36)
+                            item_uri = params.get("item_uri", "")
+                            replace = params.get("replace", False)
+                            result = self._load_sample_to_drum_pad(ti, rdi, pn, item_uri, replace)
+                        elif command_type == "ensure_drum_rack_on_track":
+                            ti = params.get("track_index", -1)
+                            name = params.get("name", "")
+                            create_if_missing = params.get("create_if_missing", True)
+                            result = self._ensure_drum_rack_on_track(ti, name, create_if_missing)
+                        elif command_type == "verify_drum_pad_loaded":
+                            ti = params.get("track_index", 0)
+                            rdi = params.get("rack_device_index", 0)
+                            pn = params.get("pad_note", 36)
+                            expected = params.get("expected_filename", "")
+                            result = self._verify_drum_pad_loaded(ti, rdi, pn, expected)
+                        elif command_type == "wait_for_load_complete":
+                            ti = params.get("track_index", 0)
+                            rdi = params.get("rack_device_index", 0)
+                            pn = params.get("pad_note", 36)
+                            max_ticks = params.get("max_ticks", 20)
+                            result = self._wait_for_load_complete(ti, rdi, pn, max_ticks)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -910,6 +939,299 @@ class AbletonMCP(ControlSurface):
             }
         except Exception as e:
             self.log_message("Error loading sample to Simpler/track: {0}".format(str(e)))
+            self.log_message(traceback.format_exc())
+            raise
+
+    # ----- Drum Rack family (B8) -----
+
+    def _find_drum_pad_by_note(self, rack, pad_note):
+        """Return Drum Rack pad matching MIDI note, or None."""
+        try:
+            for pad in rack.drum_pads:
+                if pad.note == pad_note:
+                    return pad
+        except Exception:
+            return None
+        return None
+
+    def _load_item_to_drum_pad_locked(self, track_index, rack_device_index, pad_note, item, replace=False):
+        """Load a pre-resolved BrowserItem onto a Drum Rack pad with per-(track, rack) lock + lock_sequence trace."""
+        if item is None:
+            raise ValueError("Browser item is None")
+        if hasattr(item, 'is_loadable') and not item.is_loadable:
+            raise ValueError("Browser item is not loadable")
+        item_uri = item.uri if hasattr(item, 'uri') else ""
+        item_name = item.name if hasattr(item, 'name') else ""
+
+        worker_id = self._next_worker_seq()
+        key = (track_index, rack_device_index)
+        lock = self._get_load_lock(track_index, rack_device_index)
+        self._record_lock_event(key, "acquire_request", worker_id, pad_note=pad_note)
+        acquired = lock.acquire(timeout=45)
+        if not acquired:
+            self._record_lock_event(key, "acquire_timeout", worker_id, pad_note=pad_note)
+            raise RuntimeError("BUSY: per-(track,rack) lock not acquired within 45s")
+        self._record_lock_event(key, "acquire_granted", worker_id, pad_note=pad_note)
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            if rack_device_index < 0 or rack_device_index >= len(track.devices):
+                raise IndexError("Rack device index out of range")
+            rack = track.devices[rack_device_index]
+            if not rack.can_have_drum_pads:
+                raise ValueError("Device '{0}' is not a Drum Rack".format(rack.name))
+
+            target_pad = None
+            for pad in rack.drum_pads:
+                if pad.note == pad_note:
+                    target_pad = pad
+                    break
+            if target_pad is None:
+                raise ValueError("No Drum Rack pad with MIDI note {0}".format(pad_note))
+            if target_pad.chains and not replace:
+                raise ValueError("Pad note {0} already has chains; pass replace=True to replace".format(pad_note))
+
+            pre_pad_count = len(target_pad.chains)
+            pre_sig = self._devices_signature(track)
+
+            self._song.view.selected_track = track
+            try:
+                self._song.view.select_device(rack)
+            except Exception as e:
+                self.log_message("Could not select Drum Rack: {0}".format(str(e)))
+            try:
+                rack.view.selected_drum_pad = target_pad
+            except Exception as e:
+                self.log_message("Could not select pad: {0}".format(str(e)))
+            if replace and target_pad.chains:
+                target_pad.delete_all_chains()
+                pre_pad_count = 0
+
+            self._record_lock_event(key, "load_item_start", worker_id, pad_note=pad_note)
+            self.application().browser.load_item(item)
+            self._record_lock_event(key, "load_item_end", worker_id, pad_note=pad_note)
+
+            actual_pad_note, mismatch_reason = self._find_actual_pad_note(rack, pre_pad_count, pad_note)
+            post_sig = self._devices_signature(track)
+
+            return {
+                "loaded": True, "mode": "drum_pad",
+                "item_name": item_name, "item_uri": item_uri,
+                "track_name": track.name, "rack_name": rack.name,
+                "requested_pad_note": pad_note,
+                "actual_pad_note": actual_pad_note,
+                "mismatch_reason": mismatch_reason,
+                "devices_signature_pre": list(pre_sig),
+                "devices_signature_post": list(post_sig),
+                "devices_changed": pre_sig != post_sig,
+                "pad_chain_count_after": len(target_pad.chains),
+                "worker_id": worker_id,
+                "lock_sequence": self._drain_lock_events(key, worker_id),
+            }
+        except Exception as e:
+            self.log_message("Error loading item to Drum Rack pad: {0}".format(str(e)))
+            self.log_message(traceback.format_exc())
+            raise
+        finally:
+            self._record_lock_event(key, "release", worker_id, pad_note=pad_note)
+            try:
+                lock.release()
+            except Exception:
+                pass
+
+    def _load_sample_to_drum_pad(self, track_index, rack_device_index, pad_note, item_uri, replace=False):
+        """Load by URI: resolve URI to item, delegate to locked path."""
+        app = self.application()
+        item = self._find_browser_item_by_uri(app.browser, item_uri)
+        if not item:
+            raise ValueError("Browser item with URI '{0}' not found".format(item_uri))
+        return self._load_item_to_drum_pad_locked(track_index, rack_device_index, pad_note, item, replace)
+
+    def _ensure_drum_rack_on_track(self, track_index=-1, name="", create_if_missing=True):
+        """Idempotently ensure a Drum Rack exists on a MIDI track."""
+        try:
+            created_track = False
+            if track_index < 0:
+                self._song.create_midi_track(-1)
+                track_index = len(self._song.tracks) - 1
+                created_track = True
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+            if name and created_track:
+                track.name = name
+
+            for idx, device in enumerate(track.devices):
+                if device.can_have_drum_pads:
+                    if name and not created_track and track.name.startswith("MIDI"):
+                        track.name = name
+                    return {
+                        "track_index": track_index, "track_name": track.name,
+                        "rack_device_index": idx, "rack_name": device.name,
+                        "created_track": created_track, "created_rack": False,
+                    }
+
+            if not create_if_missing:
+                return {
+                    "track_index": track_index, "track_name": track.name,
+                    "rack_device_index": None, "rack_name": None,
+                    "created_track": created_track, "created_rack": False,
+                    "error": "no_drum_rack",
+                }
+
+            app = self.application()
+            rack_item = self._search_browser_by_name(app.browser, "Drum Rack", max_depth=8)
+            if rack_item is None:
+                rack_item = self._search_browser_by_name(app.browser, "Drum Rack.adg", max_depth=8)
+            if rack_item is None:
+                raise ValueError("Drum Rack browser item not found")
+
+            pre_count = len(track.devices)
+            self._song.view.selected_track = track
+            app.browser.load_item(rack_item)
+
+            rack_index = None
+            rack_name = None
+            for idx in range(pre_count, len(track.devices)):
+                device = track.devices[idx]
+                if device.can_have_drum_pads:
+                    rack_index = idx
+                    rack_name = device.name
+                    break
+            if rack_index is None:
+                for idx, device in enumerate(track.devices):
+                    if device.can_have_drum_pads:
+                        rack_index = idx
+                        rack_name = device.name
+                        break
+            if rack_index is None:
+                raise ValueError("Drum Rack load completed but no Drum Rack device was found")
+
+            return {
+                "track_index": track_index, "track_name": track.name,
+                "rack_device_index": rack_index, "rack_name": rack_name,
+                "created_track": created_track, "created_rack": True,
+            }
+        except Exception as e:
+            self.log_message("Error ensuring Drum Rack: {0}".format(str(e)))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _verify_drum_pad_loaded(self, track_index, rack_device_index, pad_note, expected_filename=""):
+        """Verify that a Drum Rack pad has a loaded sampler chain."""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            if rack_device_index < 0 or rack_device_index >= len(track.devices):
+                raise IndexError("Rack device index out of range")
+            rack = track.devices[rack_device_index]
+            if not rack.can_have_drum_pads:
+                raise ValueError("Device '{0}' is not a Drum Rack".format(rack.name))
+
+            def _expected_tokens(filename):
+                if not filename:
+                    return []
+                base = filename.replace("\\", "/").split("/")[-1].lower()
+                stem = base.rsplit(".", 1)[0]
+                return [base, stem]
+
+            def _pad_device_names(pad):
+                names = []
+                for chain in pad.chains:
+                    if chain.name:
+                        names.append(chain.name)
+                    for device in chain.devices:
+                        if device.name:
+                            names.append(device.name)
+                return names
+
+            def _matches_expected(names, filename):
+                tokens = _expected_tokens(filename)
+                if not tokens:
+                    return True
+                lowered = [n.lower() for n in names]
+                for token in tokens:
+                    for candidate in lowered:
+                        if token and (token in candidate or candidate in token):
+                            return True
+                return False
+
+            target_pad = self._find_drum_pad_by_note(rack, pad_note)
+            if target_pad is None:
+                raise ValueError("No Drum Rack pad with MIDI note {0}".format(pad_note))
+
+            target_names = _pad_device_names(target_pad)
+            if not target_pad.chains:
+                if expected_filename:
+                    for pad in rack.drum_pads:
+                        if pad.note == pad_note or not pad.chains:
+                            continue
+                        names = _pad_device_names(pad)
+                        if _matches_expected(names, expected_filename):
+                            return {
+                                "loaded": False, "mismatch_reason": "off_by_one",
+                                "requested_pad_note": pad_note,
+                                "actual_pad_note": pad.note,
+                                "device_names": names,
+                            }
+                return {
+                    "loaded": False, "mismatch_reason": "no_chain",
+                    "requested_pad_note": pad_note,
+                    "actual_pad_note": None, "device_names": [],
+                }
+
+            if expected_filename and not _matches_expected(target_names, expected_filename):
+                for pad in rack.drum_pads:
+                    if pad.note == pad_note or not pad.chains:
+                        continue
+                    names = _pad_device_names(pad)
+                    if _matches_expected(names, expected_filename):
+                        return {
+                            "loaded": False, "mismatch_reason": "off_by_one",
+                            "requested_pad_note": pad_note,
+                            "actual_pad_note": pad.note,
+                            "device_names": target_names,
+                        }
+                return {
+                    "loaded": False, "mismatch_reason": "wrong_filename",
+                    "requested_pad_note": pad_note,
+                    "actual_pad_note": pad_note,
+                    "device_names": target_names,
+                }
+
+            return {
+                "loaded": True, "mismatch_reason": None,
+                "requested_pad_note": pad_note,
+                "actual_pad_note": pad_note,
+                "device_names": target_names,
+            }
+        except Exception as e:
+            self.log_message("Error verifying Drum Rack pad: {0}".format(str(e)))
+            self.log_message(traceback.format_exc())
+            raise
+
+    def _wait_for_load_complete(self, track_index, rack_device_index, pad_note, max_ticks=20):
+        """Poll a Drum Rack pad for a loaded chain after browser.load_item."""
+        try:
+            try:
+                max_ticks = int(max_ticks)
+            except Exception:
+                max_ticks = 20
+            if max_ticks < 0:
+                max_ticks = 0
+            last = None
+            for tick in range(max_ticks + 1):
+                last = self._verify_drum_pad_loaded(track_index, rack_device_index, pad_note, "")
+                last["ticks_waited"] = tick
+                if last.get("loaded"):
+                    return last
+                time.sleep(0.05)
+            return last
+        except Exception as e:
+            self.log_message("Error waiting for Drum Rack pad load: {0}".format(str(e)))
             self.log_message(traceback.format_exc())
             raise
 
