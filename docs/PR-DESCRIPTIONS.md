@@ -1,7 +1,7 @@
 # PR descriptions — ready for upstream submission
 
 **Target repository**: [uisato/ableton-mcp-extended](https://github.com/uisato/ableton-mcp-extended)
-**Source branch**: [bunau-dj/ableton-mcp-extended:our-extensions](https://github.com/bunau-dj/ableton-mcp-extended/tree/our-extensions)
+**Source branch**: [yxjxyyqqfx/ableton-mcp-extended:our-extensions](https://github.com/yxjxyyqqfx/ableton-mcp-extended/tree/our-extensions)
 **Branch parent**: `upstream/main @ 1116449`
 **Tests baseline**: 143 passing → 178 passing on the deepest PR-D stack (+44 new unit tests across all five PRs; one BUSY-path test for a removed private helper was dropped in the pre-submission review).
 
@@ -9,7 +9,7 @@ All five PRs were validated against a real Ableton Live 12.3 session: socket con
 
 **Per-branch test counts** (each branch starts from `upstream/main @ 1116449`):
 
-| PR  | Branch (origin = `bunau-dj`)         | Tests pass | Δ vs baseline | Stacked on              |
+| PR  | Branch (origin = `yxjxyyqqfx`)       | Tests pass | Δ vs baseline | Stacked on              |
 | --- | ------------------------------------ | ---------- | ------------- | ----------------------- |
 | A   | `pr/config-env-vars`                 | 146        | +3            | (independent)           |
 | B   | `pr/dispatch-and-load-foundation`    | 166        | +23           | (foundation)            |

@@ -3,7 +3,7 @@
 Tracks the lifecycle of the five upstream PRs derived from the `our-extensions` work.
 
 - **Target repository**: [uisato/ableton-mcp-extended](https://github.com/uisato/ableton-mcp-extended)
-- **Source fork**: [bunau-dj/ableton-mcp-extended](https://github.com/bunau-dj/ableton-mcp-extended)
+- **Source fork**: [yxjxyyqqfx/ableton-mcp-extended](https://github.com/yxjxyyqqfx/ableton-mcp-extended)
 - **Body drafts**: `.sisyphus/pr-bodies/<feature>.md` (English, GitHub-ready)
 - **Master description**: [`docs/PR-DESCRIPTIONS.md`](./PR-DESCRIPTIONS.md)
 
@@ -22,18 +22,18 @@ Tracks the lifecycle of the five upstream PRs derived from the `our-extensions` 
 
 ## Status table
 
-| PR  | Feature                              | Origin branch                        | Compare URL                                                                                                                                                          | Submitted (UTC) | URL                | Last signal | State                                                |
-| --- | ------------------------------------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | ------------------ | ----------- | ---------------------------------------------------- |
-| A   | `feat(config)`: env-driven host/port | `pr/config-env-vars`                 | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...bunau-dj:ableton-mcp-extended:pr/config-env-vars)                                             | (pending)       | (pending)          | —           | branch pushed, body drafted, awaiting user submit    |
-| B   | dispatch + concurrency + diagnostics | `pr/dispatch-and-load-foundation`    | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...bunau-dj:ableton-mcp-extended:pr/dispatch-and-load-foundation)                               | (pending)       | (pending)          | —           | branch pushed, body drafted, blocked by T5.1 pacing  |
-| C   | `load_sample_to_simpler`             | `pr/load-sample-to-simpler`          | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...bunau-dj:ableton-mcp-extended:pr/load-sample-to-simpler)                                     | (pending)       | (pending)          | —           | branch pushed, body drafted, stacked on PR-B         |
-| D   | Drum Rack pad family                 | `pr/drum-rack-family`                | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...bunau-dj:ableton-mcp-extended:pr/drum-rack-family)                                           | (pending)       | (pending)          | —           | branch pushed, body drafted, stacked on PR-C         |
-| E   | expanded URI search roots            | `pr/find-browser-item-uri-expansion` | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...bunau-dj:ableton-mcp-extended:pr/find-browser-item-uri-expansion)                            | (pending)       | (pending)          | —           | branch pushed, body drafted, stacked on PR-B         |
+| PR  | Feature                              | Origin branch                        | Compare URL                                                                                                                                                | Submitted (UTC) | URL       | Last signal | State                                                |
+| --- | ------------------------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | --------- | ----------- | ---------------------------------------------------- |
+| A   | `feat(config)`: env-driven host/port | `pr/config-env-vars`                 | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/config-env-vars)                                 | (pending)       | (pending) | —           | branch pushed, body drafted, awaiting user submit    |
+| B   | dispatch + concurrency + diagnostics | `pr/dispatch-and-load-foundation`    | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/dispatch-and-load-foundation)                   | (pending)       | (pending) | —           | branch pushed, body drafted, blocked by T5.1 pacing  |
+| C   | `load_sample_to_simpler`             | `pr/load-sample-to-simpler`          | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/load-sample-to-simpler)                         | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-B         |
+| D   | Drum Rack pad family                 | `pr/drum-rack-family`                | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/drum-rack-family)                               | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-C         |
+| E   | expanded URI search roots            | `pr/find-browser-item-uri-expansion` | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/find-browser-item-uri-expansion)                | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-B         |
 
 ## How to submit (per PR)
 
 1. Open the PR's compare URL above.
-2. GitHub will show "Choose a base repository... and a head repository...". Confirm: base = `uisato/ableton-mcp-extended:main`, head = `bunau-dj/ableton-mcp-extended:<branch>`.
+2. GitHub will show "Choose a base repository... and a head repository...". Confirm: base = `uisato/ableton-mcp-extended:main`, head = `yxjxyyqqfx/ableton-mcp-extended:<branch>`.
 3. Copy the body from `.sisyphus/pr-bodies/<feature>.md` into the description field.
 4. Set the title to the corresponding commit subject from `docs/PR-DESCRIPTIONS.md`:
    - PR-A: `feat(config): support ABLETON_HOST and ABLETON_PORT env vars`
@@ -44,8 +44,12 @@ Tracks the lifecycle of the five upstream PRs derived from the `our-extensions` 
 5. Click "Create pull request".
 6. Paste the resulting PR URL back into the agent chat. The agent will fill in the corresponding row above and start the pacing timer for the next PR.
 
+## Identity history
+
+The fork was migrated on 2026-05-12 from `bunau-dj/ableton-mcp-extended` (which exposed a private intranet email `t@wcode.club` via every commit author) to `yxjxyyqqfx/ableton-mcp-extended`. All 17 commits were rewritten with author/committer `AI Producer <284103581+yxjxyyqqfx@users.noreply.github.com>` (the GitHub noreply email for user `yxjxyyqqfx`, ID 284103581). The old `bunau-dj` fork was deleted from GitHub. Local backup of the pre-migration state lives in `/home/opencode/.tmp/opencode/ableton-mcp-backup/`.
+
 ## Notes
 
 - Each PR branch is independent of `our-extensions` and was cherry-picked onto `upstream/main @ 1116449` directly, so any maintainer can rebase or squash without touching the fork.
-- The fork-only commit (`57833ed`, F6 diagnostic probes) is **excluded** from every PR — it lives only on `bunau-dj:our-extensions`.
+- The fork-only commit (`feat(remote, fork-only): F6 diagnostic probes`) is **excluded** from every PR — it lives only on `yxjxyyqqfx:our-extensions`.
 - If the maintainer prefers all five changes in a single PR, all five branches can be merged together into `our-extensions` (or a new combined branch) and submitted as one. The split is a courtesy, not a requirement.
