@@ -23,18 +23,13 @@ HOST = "localhost"
 # makes it explicit which command names are supported. New mutating handlers
 # must append their command name here.
 VALID_COMMANDS = frozenset({
-    # Read-only handlers
+    # Read-only handlers dispatched BEFORE the main_thread_task branch.
+    # Only get_session_info and get_track_info pass through here; the rest of
+    # the read-only handlers (get_browser_*, get_arrangement_info, etc.) are
+    # dispatched in specific elif cases AFTER this allowlist so they bypass
+    # main_thread_task and must NOT appear in this set.
     "get_session_info",
     "get_track_info",
-    "get_arrangement_info",
-    "get_browser_tree",
-    "get_browser_item",
-    "get_browser_items_at_path",
-    "get_chain_info",
-    "get_cue_points",
-    "get_device_parameters",
-    "get_drum_pad_info",
-    "get_track_volume",
     # Mutating handlers
     "create_midi_track",
     "set_track_name",
