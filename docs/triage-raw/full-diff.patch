@@ -1,0 +1,2421 @@
+diff --git a/AbletonMCP_Remote_Script/__init__.py b/AbletonMCP_Remote_Script/__init__.py
+index 310bfa2..cbbc7e6 100644
+--- a/AbletonMCP_Remote_Script/__init__.py
++++ b/AbletonMCP_Remote_Script/__init__.py
+@@ -18,12 +18,72 @@ except ImportError:
+ DEFAULT_PORT = 9877
+ HOST = "localhost"
+ 
++VALID_COMMANDS = frozenset({
++    "get_session_info",
++    "get_track_info",
++    "create_midi_track",
++    "set_track_name",
++    "create_clip",
++    "add_notes_to_clip",
++    "set_clip_name",
++    "set_tempo",
++    "fire_clip",
++    "stop_clip",
++    "start_playback",
++    "stop_playback",
++    "load_browser_item",
++    "set_song_time",
++    "set_arrangement_loop",
++    "jump_to_cue",
++    "create_cue_point",
++    "delete_cue_point",
++    "create_arrangement_clip",
++    "create_arrangement_audio_clip",
++    "duplicate_to_arrangement",
++    "delete_arrangement_clip",
++    "set_arrangement_clip_property",
++    "set_view",
++    "control_arrangement_view",
++    "manage_clip_automation",
++    "add_notes_to_arrangement_clip",
++    "set_device_parameter",
++    "set_device_enabled",
++    "delete_device",
++    "navigate_preset",
++    "delete_track",
++    "probe_environment",
++    "set_track_volume",
++    "set_track_panning",
++    "load_sample_to_simpler",
++    "load_sample_to_drum_pad",
++    "load_browser_sample_by_name",
++    "ensure_drum_rack_on_track",
++    "verify_drum_pad_loaded",
++    "wait_for_load_complete",
++    "resolve_filepath_to_browser_path",
++    "probe_export_capabilities",
++    "probe_export_dialog_controls",
++    "probe_track_api_dir",
++    "probe_routing_setter",
++    "probe_routing_current_value",
++    "restore_routing_by_display_name",
++    "smoke_resample",
++    "probe_routing_full",
++})
++
+ def create_instance(c_instance):
+     """Create and return the AbletonMCP script instance"""
+     return AbletonMCP(c_instance)
+ 
+ class AbletonMCP(ControlSurface):
+     """AbletonMCP Remote Script for Ableton Live"""
++
++    _FILEPATH_BROWSER_MAPPING = [
++        ("/ocp/mnt/_lib_", "User_folders/_lib_"),
++        ("/Users/user/Documents/_lib_", "User_folders/_lib_"),
++        ("/ocp/mnt/Splice", "User_folders/Splice"),
++        ("/Users/user/Splice", "User_folders/Splice"),
++    ]
+     
+     def __init__(self, c_instance):
+         """Initialize the control surface"""
+@@ -38,6 +98,10 @@ class AbletonMCP(ControlSurface):
+         
+         # Cache the song reference for easier access
+         self._song = self.song()
++        self._load_locks = {}  # key: (track_index, rack_device_index) -> threading.Lock
++        self._lock_events = {}  # key: (track_index, rack_device_index) -> list of event dicts
++        self._worker_seq = 0
++        self._worker_seq_lock = threading.Lock()
+         
+         # Start the socket server
+         self.start_server()
+@@ -225,23 +289,11 @@ class AbletonMCP(ControlSurface):
+             elif command_type == "get_track_info":
+                 track_index = params.get("track_index", 0)
+                 response["result"] = self._get_track_info(track_index)
++            elif command_type == "resolve_filepath_to_browser_path":
++                fp = params.get("filepath", "")
++                response["result"] = {"browser_path": self._resolve_filepath_to_browser_path(fp)}
+             # Commands that modify Live's state should be scheduled on the main thread
+-            elif command_type in ["create_midi_track", "set_track_name",
+-                                 "create_clip", "add_notes_to_clip", "set_clip_name",
+-                                 "set_tempo", "fire_clip", "stop_clip",
+-                                 "start_playback", "stop_playback", "load_browser_item",
+-                                 "set_song_time", "set_arrangement_loop", "jump_to_cue",
+-                                 "create_cue_point", "delete_cue_point",
+-                                 "create_arrangement_clip", "create_arrangement_audio_clip",
+-                                 "duplicate_to_arrangement", "delete_arrangement_clip",
+-                                 "set_arrangement_clip_property",
+-                                 "set_view", "control_arrangement_view",
+-                                 "manage_clip_automation",
+-                                 "add_notes_to_arrangement_clip",
+-                                 "set_device_parameter", "set_device_enabled",
+-                                 "delete_device", "navigate_preset",
+-                                 "delete_track",
+-                                 "set_track_volume", "set_track_panning"]:
++            elif command_type in VALID_COMMANDS:
+                 # Use a thread-safe approach with a response queue
+                 response_queue = queue.Queue()
+                 
+@@ -294,6 +346,71 @@ class AbletonMCP(ControlSurface):
+                             track_index = params.get("track_index", 0)
+                             item_uri = params.get("item_uri", "")
+                             result = self._load_browser_item(track_index, item_uri)
++                        elif command_type == "load_sample_to_simpler":
++                            ti = params.get("track_index", 0)
++                            item_uri = params.get("item_uri", "")
++                            di = params.get("device_index", None)
++                            result = self._load_sample_to_simpler(ti, item_uri, di)
++                        elif command_type == "load_sample_to_drum_pad":
++                            ti = params.get("track_index", 0)
++                            item_uri = params.get("item_uri", "")
++                            rack_di = params.get("rack_device_index", 0)
++                            pad_note = params.get("pad_note", 36)
++                            replace = params.get("replace", False)
++                            result = self._load_sample_to_drum_pad(ti, rack_di, pad_note, item_uri, replace)
++                        elif command_type == "load_browser_sample_by_name":  # noqa
++                            ti = params.get("track_index", 0)
++                            rack_di = params.get("rack_device_index", 0)
++                            pad_note = params.get("pad_note", 36)
++                            replace = params.get("replace", False)
++                            filename = params.get("filename", "")
++                            search_root = params.get("search_root", "User_folders/Splice")
++                            result = self._load_browser_sample_by_name(
++                                ti, rack_di, pad_note, filename, search_root, replace)
++                        elif command_type == "ensure_drum_rack_on_track":
++                            ti = params.get("track_index", -1)
++                            name = params.get("name", "")
++                            create = params.get("create_if_missing", True)
++                            result = self._ensure_drum_rack_on_track(ti, name, create)
++                        elif command_type == "verify_drum_pad_loaded":
++                            ti = params.get("track_index", 0)
++                            rack_di = params.get("rack_device_index", 0)
++                            pad_note = params.get("pad_note", 36)
++                            expected = params.get("expected_filename", "")
++                            result = self._verify_drum_pad_loaded(ti, rack_di, pad_note, expected)
++                        elif command_type == "wait_for_load_complete":
++                            ti = params.get("track_index", 0)
++                            rack_di = params.get("rack_device_index", 0)
++                            pad_note = params.get("pad_note", 36)
++                            max_ticks = params.get("max_ticks", 20)
++                            result = self._wait_for_load_complete(ti, rack_di, pad_note, max_ticks)
++                        elif command_type == "probe_environment":
++                            result = self._probe_environment()
++                        elif command_type == "probe_export_capabilities":
++                            result = self._probe_export_capabilities()
++                        elif command_type == "probe_export_dialog_controls":
++                            max_depth = params.get("max_depth", 5)
++                            result = self._probe_export_dialog_controls(max_depth)
++                        elif command_type == "probe_track_api_dir":
++                            ti = params.get("track_index", 0)
++                            result = self._probe_track_api_dir(ti)
++                        elif command_type == "probe_routing_setter":
++                            ti = params.get("track_index", 0)
++                            result = self._probe_routing_setter(ti)
++                        elif command_type == "probe_routing_current_value":
++                            ti = params.get("track_index", 0)
++                            result = self._probe_routing_current_value(ti)
++                        elif command_type == "restore_routing_by_display_name":
++                            ti = params.get("track_index", 0)
++                            target_dn = params.get("target_display_name", "Ext. In")
++                            result = self._restore_routing_by_display_name(ti, target_dn)
++                        elif command_type == "smoke_resample":
++                            src_track = params.get("source_track_index", 0)
++                            dur = params.get("duration_seconds", 4.0)
++                            result = self._smoke_resample(src_track, dur)
++                        elif command_type == "probe_routing_full":
++                            ti = params.get("track_index", 0)
++                            result = self._probe_routing_full(ti)
+                         elif command_type == "set_song_time":
+                             time_val = params.get("time", 0.0)
+                             result = self._set_song_time(time_val)
+@@ -408,9 +525,18 @@ class AbletonMCP(ControlSurface):
+                     # If we're already on the main thread, execute directly
+                     main_thread_task()
+                 
+-                # Wait for the response with a timeout
++                # Wait for the response with a timeout (longer for browser load commands).
++                _LONG_LOAD_COMMANDS = (
++                    "load_sample_to_drum_pad",
++                    "load_sample_to_simpler",
++                    "load_browser_sample_by_name",
++                    "ensure_drum_rack_on_track",
++                    "wait_for_load_complete",
++                    "probe_export_dialog_controls",
++                )
++                _wait_timeout = 90.0 if command_type in _LONG_LOAD_COMMANDS else 10.0
+                 try:
+-                    task_response = response_queue.get(timeout=10.0)
++                    task_response = response_queue.get(timeout=_wait_timeout)
+                     if task_response.get("status") == "error":
+                         response["status"] = "error"
+                         response["message"] = task_response.get("message", "Unknown error")
+@@ -1046,10 +1172,1770 @@ class AbletonMCP(ControlSurface):
+             self.log_message("Error loading browser item: {0}".format(str(e)))
+             self.log_message(traceback.format_exc())
+             raise
++
++    def _next_worker_seq(self):
++        """Allocate a monotonically increasing worker id for lock sequence evidence."""
++        with self._worker_seq_lock:
++            self._worker_seq += 1
++            return self._worker_seq
++
++    def _record_lock_event(self, key, event, worker_id, **extra):
++        """Append a lock event with monotonic timestamp for race serialization evidence."""
++        try:
++            evt = {"event": event, "ts": time.time(), "worker_id": worker_id}
++            if extra:
++                evt.update(extra)
++            self._lock_events.setdefault(key, []).append(evt)
++        except Exception:
++            pass
++
++    def _drain_lock_events(self, key, worker_id):
++        """Return events for the given key+worker_id; oldest first; do not mutate other workers."""
++        try:
++            events = self._lock_events.get(key, [])
++            mine = [e for e in events if e.get("worker_id") == worker_id]
++            return mine
++        except Exception:
++            return []
++
++    def _get_load_lock(self, track_index, rack_device_index):
++        """Return (creating if needed) the per-(track, rack) threading.Lock."""
++        key = (track_index, rack_device_index)
++        if key not in self._load_locks:
++            self._load_locks[key] = threading.Lock()
++        return self._load_locks[key]
++
++    def _devices_signature(self, track):
++        """Return a tuple identifying current device topology on a track."""
++        try:
++            return tuple((d.class_name, id(d)) for d in track.devices)
++        except Exception:
++            return ()
++
++    def _load_complete_predicate(self, track, target_pad, pre_pad_count,
++                                pre_devices_signature,
++                                expected_classes=None):
++        """Check if a browser.load_item() has completed on a Drum Rack pad.
++
++        Returns (reason, is_complete) where reason is None on success or a
++        string describing the failure/pending state.
++
++        Must be called from the Ableton main thread (inside schedule_message callback).
++        """
++        if expected_classes is None:
++            expected_classes = {"OriginalSimpler", "MultiSampler"}
++        try:
++            # 1. Track topology must be stable (no Drum Rack -> Simpler swap).
++            current_sig = self._devices_signature(track)
++            if current_sig != pre_devices_signature:
++                return ("topology_changed", False)
++            # 2. New chain must have appeared on the target pad.
++            if len(target_pad.chains) <= pre_pad_count:
++                return (None, False)  # still loading
++            last_chain = target_pad.chains[-1]
++            if not last_chain.devices:
++                return (None, False)  # chain exists but device not yet attached
++            # 3. Device class must be a sampler.
++            device_class = last_chain.devices[0].class_name
++            if device_class not in expected_classes:
++                return ("wrong_device_class:{0}".format(device_class), False)
++            return (None, True)
++        except Exception as e:
++            return ("predicate_error:{0}".format(str(e)), False)
++
++    def _find_actual_pad_note(self, rack, pre_pad_count, requested_pad_note):
++        """Scan drum pads to find which one gained a new chain after load.
++
++        Returns (actual_pad_note, mismatch_reason) where mismatch_reason is
++        None if actual == requested, or "off_by_one" if they differ.
++        Diagnostic-only: no compensation is applied.
++        """
++        try:
++            for pad in rack.drum_pads:
++                if len(pad.chains) > pre_pad_count:
++                    actual = pad.note
++                    reason = None if actual == requested_pad_note else "off_by_one"
++                    if reason:
++                        self.log_message(
++                            "WARN off_by_one: requested={0} actual={1}".format(
++                                requested_pad_note, actual))
++                    return (actual, reason)
++            return (requested_pad_note, None)
++        except Exception as e:
++            self.log_message("Error in _find_actual_pad_note: {0}".format(str(e)))
++            return (requested_pad_note, None)
++
++    def _load_browser_item_with_retry(self, spec, item, response_queue, max_ticks=20):
++        """State-machine loader: worker thread -> main thread via schedule_message.
++
++        spec = {
++            "kind": "drum_pad",
++            "track_index": int,
++            "rack_device_index": int,
++            "pad_note": int,
++            "replace": bool,
++        }
++        item: Live BrowserItem (must be loadable)
++        response_queue: threading.Queue to push final result dict
++        max_ticks: max schedule_message(1,...) retries before timeout
++        """
++        track_index = spec.get("track_index", 0)
++        rack_device_index = spec.get("rack_device_index", 0)
++        pad_note = spec.get("pad_note", 36)
++        replace = spec.get("replace", False)
++        item_name = item.name if hasattr(item, 'name') else "unknown"
++        item_uri = item.uri if hasattr(item, 'uri') else "unknown"
++
++        # Acquire per-(track, rack) lock in worker thread with timeout.
++        lock = self._get_load_lock(track_index, rack_device_index)
++        acquired = lock.acquire(timeout=10)
++        if not acquired:
++            response_queue.put({
++                "loaded": False,
++                "mode": "drum_pad",
++                "item_name": item_name,
++                "item_uri": item_uri,
++                "requested_pad_note": pad_note,
++                "actual_pad_note": None,
++                "devices_signature_pre": None,
++                "devices_signature_post": None,
++                "devices_changed": None,
++                "ticks_waited": 0,
++                "errors": ["BUSY: lock not acquired within 10s"],
++            })
++            return
++
++        # Transition to main thread.
++        def _start_load():
++            try:
++                if track_index < 0 or track_index >= len(self._song.tracks):
++                    raise IndexError("Track index out of range")
++                track = self._song.tracks[track_index]
++                if rack_device_index < 0 or rack_device_index >= len(track.devices):
++                    raise IndexError("Rack device index out of range")
++                rack = track.devices[rack_device_index]
++                if not rack.can_have_drum_pads:
++                    raise ValueError("Device is not a Drum Rack")
++
++                target_pad = None
++                for pad in rack.drum_pads:
++                    if pad.note == pad_note:
++                        target_pad = pad
++                        break
++                if target_pad is None:
++                    raise ValueError("No pad with note {0}".format(pad_note))
++                if target_pad.chains and not replace:
++                    raise ValueError("Pad {0} already has chains; use replace=True".format(pad_note))
++
++                pre_pad_count = len(target_pad.chains)
++                pre_sig = self._devices_signature(track)
++
++                self._song.view.selected_track = track
++                try:
++                    self._song.view.select_device(rack)
++                except Exception:
++                    pass
++                try:
++                    rack.view.selected_drum_pad = target_pad
++                except Exception:
++                    pass
++                if replace and target_pad.chains:
++                    target_pad.delete_all_chains()
++                    pre_pad_count = 0
++
++                app = self.application()
++                app.browser.load_item(item)
++
++                def _check(tick):
++                    try:
++                        reason, done = self._load_complete_predicate(
++                            track, target_pad, pre_pad_count, pre_sig)
++                        if done:
++                            post_sig = self._devices_signature(track)
++                            actual_note = pad_note
++                            for p in rack.drum_pads:
++                                if len(p.chains) > (0 if replace else pre_pad_count):
++                                    actual_note = p.note
++                                    break
++                            lock.release()
++                            response_queue.put({
++                                "loaded": True,
++                                "mode": "drum_pad",
++                                "item_name": item_name,
++                                "item_uri": item_uri,
++                                "requested_pad_note": pad_note,
++                                "actual_pad_note": actual_note,
++                                "devices_signature_pre": list(pre_sig),
++                                "devices_signature_post": list(post_sig),
++                                "devices_changed": pre_sig != post_sig,
++                                "ticks_waited": tick,
++                                "errors": [],
++                            })
++                        elif reason == "topology_changed":
++                            lock.release()
++                            response_queue.put({
++                                "loaded": False,
++                                "mode": "drum_pad",
++                                "item_name": item_name,
++                                "item_uri": item_uri,
++                                "requested_pad_note": pad_note,
++                                "actual_pad_note": None,
++                                "devices_signature_pre": list(pre_sig),
++                                "devices_signature_post": list(self._devices_signature(track)),
++                                "devices_changed": True,
++                                "ticks_waited": tick,
++                                "errors": ["topology_changed: Drum Rack replaced"],
++                            })
++                        elif tick >= max_ticks:
++                            lock.release()
++                            response_queue.put({
++                                "loaded": False,
++                                "mode": "drum_pad",
++                                "item_name": item_name,
++                                "item_uri": item_uri,
++                                "requested_pad_note": pad_note,
++                                "actual_pad_note": None,
++                                "devices_signature_pre": list(pre_sig),
++                                "devices_signature_post": list(self._devices_signature(track)),
++                                "devices_changed": None,
++                                "ticks_waited": tick,
++                                "errors": ["timeout after {0} ticks".format(max_ticks)],
++                            })
++                        else:
++                            self.schedule_message(1, lambda: _check(tick + 1))
++                    except Exception as e:
++                        lock.release()
++                        response_queue.put({
++                            "loaded": False,
++                            "mode": "drum_pad",
++                            "item_name": item_name,
++                            "item_uri": item_uri,
++                            "requested_pad_note": pad_note,
++                            "actual_pad_note": None,
++                            "devices_signature_pre": None,
++                            "devices_signature_post": None,
++                            "devices_changed": None,
++                            "ticks_waited": tick,
++                            "errors": [str(e)],
++                        })
++
++                self.schedule_message(1, lambda: _check(0))
++
++            except Exception as e:
++                lock.release()
++                response_queue.put({
++                    "loaded": False,
++                    "mode": "drum_pad",
++                    "item_name": item_name,
++                    "item_uri": item_uri,
++                    "requested_pad_note": pad_note,
++                    "actual_pad_note": None,
++                    "devices_signature_pre": None,
++                    "devices_signature_post": None,
++                    "devices_changed": None,
++                    "ticks_waited": 0,
++                    "errors": [str(e)],
++                })
++
++        self.schedule_message(0, _start_load)
++
++    def _browser_children(self, browser_or_item):
++        """Return browser children using safer, bounded access patterns."""
++        try:
++            if browser_or_item is None:
++                return []
++            try:
++                string_types = (basestring,)
++            except NameError:
++                string_types = (str, bytes)
++            if isinstance(browser_or_item, string_types):
++                return []
++            if isinstance(browser_or_item, (list, tuple)):
++                return browser_or_item
++
++            if hasattr(browser_or_item, 'children'):
++                try:
++                    children = browser_or_item.children
++                except Exception:
++                    children = None
++                if children is not None:
++                    if isinstance(children, string_types):
++                        return []
++                    if isinstance(children, (list, tuple)):
++                        return children
++                    return self._browser_children(children)
++
++            max_items = 512
++            children = []
++            indexed = False
++            try:
++                for idx in range(max_items):
++                    try:
++                        child = browser_or_item[idx]
++                        children.append(child)
++                        indexed = True
++                    except Exception:
++                        if idx == 0:
++                            raise
++                        break
++                return children
++            except Exception:
++                if not indexed:
++                    try:
++                        for child in browser_or_item:
++                            children.append(child)
++                            if len(children) >= max_items:
++                                break
++                        return children
++                    except Exception:
++                        return []
++                return children
++        except Exception:
++            return []
+     
++    def _load_sample_to_simpler(self, track_index, item_uri, device_index=None):
++        """Load a browser sample item into selected Simpler or onto a MIDI track.
++
++        Live exposes Simpler.sample as read-only, so sample assignment must go
++        through Browser.load_item with the destination track/device selected.
++        """
++        try:
++            if track_index < 0 or track_index >= len(self._song.tracks):
++                raise IndexError("Track index out of range")
++            track = self._song.tracks[track_index]
++            app = self.application()
++            item = self._find_browser_item_by_uri(app.browser, item_uri)
++            if not item:
++                raise ValueError("Browser item with URI '{0}' not found".format(item_uri))
++            if hasattr(item, 'is_loadable') and not item.is_loadable:
++                raise ValueError("Browser item with URI '{0}' is not loadable".format(item_uri))
++
++            self._song.view.selected_track = track
++            selected_device_name = None
++            if device_index is not None:
++                if device_index < 0 or device_index >= len(track.devices):
++                    raise IndexError("Device index out of range")
++                device = track.devices[device_index]
++                selected_device_name = device.name
++                try:
++                    self._song.view.select_device(device)
++                except Exception as e:
++                    self.log_message("Could not select device before sample load: {0}".format(str(e)))
++
++            app.browser.load_item(item)
++            return {
++                "loaded": True,
++                "mode": "simpler_or_track",
++                "item_name": item.name,
++                "track_name": track.name,
++                "selected_device": selected_device_name,
++                "uri": item_uri,
++                "devices_after": [d.name for d in track.devices],
++            }
++        except Exception as e:
++            self.log_message("Error loading sample to Simpler/track: {0}".format(str(e)))
++            self.log_message(traceback.format_exc())
++            raise
++    
++    def _load_item_to_drum_pad_locked(self, track_index, rack_device_index, pad_note, item, replace=False):
++        """Load a pre-resolved BrowserItem onto a Drum Rack pad. Takes per-(track,rack) lock and emits lock_sequence.
++
++        Skips _find_browser_item_by_uri traversal because the caller already has the item.
++        Cuts ~9s of redundant browser-tree walking per load.
++        """
++        if item is None:
++            raise ValueError("Browser item is None")
++        if hasattr(item, 'is_loadable') and not item.is_loadable:
++            raise ValueError("Browser item is not loadable")
++        item_uri = item.uri if hasattr(item, 'uri') else ""
++        item_name = item.name if hasattr(item, 'name') else ""
++
++        worker_id = self._next_worker_seq()
++        key = (track_index, rack_device_index)
++        lock = self._get_load_lock(track_index, rack_device_index)
++        self._record_lock_event(key, "acquire_request", worker_id, pad_note=pad_note)
++        acquired = lock.acquire(timeout=45)
++        if not acquired:
++            self._record_lock_event(key, "acquire_timeout", worker_id, pad_note=pad_note)
++            raise RuntimeError("BUSY: per-(track,rack) lock not acquired within 45s")
++        self._record_lock_event(key, "acquire_granted", worker_id, pad_note=pad_note)
++        try:
++            if track_index < 0 or track_index >= len(self._song.tracks):
++                raise IndexError("Track index out of range")
++            track = self._song.tracks[track_index]
++            if rack_device_index < 0 or rack_device_index >= len(track.devices):
++                raise IndexError("Rack device index out of range")
++            rack = track.devices[rack_device_index]
++            if not rack.can_have_drum_pads:
++                raise ValueError("Device '{0}' is not a Drum Rack".format(rack.name))
++
++            target_pad = None
++            for pad in rack.drum_pads:
++                if pad.note == pad_note:
++                    target_pad = pad
++                    break
++            if target_pad is None:
++                raise ValueError("No Drum Rack pad with MIDI note {0}".format(pad_note))
++            if target_pad.chains and not replace:
++                raise ValueError("Pad note {0} already has chains; pass replace=True to replace".format(pad_note))
++
++            pre_pad_count = len(target_pad.chains)
++            pre_sig = self._devices_signature(track)
++
++            self._song.view.selected_track = track
++            try:
++                self._song.view.select_device(rack)
++            except Exception as e:
++                self.log_message("Could not select Drum Rack: {0}".format(str(e)))
++            try:
++                rack.view.selected_drum_pad = target_pad
++            except Exception as e:
++                self.log_message("Could not select pad: {0}".format(str(e)))
++            if replace and target_pad.chains:
++                target_pad.delete_all_chains()
++                pre_pad_count = 0
++
++            self._record_lock_event(key, "load_item_start", worker_id, pad_note=pad_note)
++            self.application().browser.load_item(item)
++            self._record_lock_event(key, "load_item_end", worker_id, pad_note=pad_note)
++
++            actual_pad_note, mismatch_reason = self._find_actual_pad_note(rack, pre_pad_count, pad_note)
++            post_sig = self._devices_signature(track)
++
++            return {
++                "loaded": True,
++                "mode": "drum_pad",
++                "item_name": item_name,
++                "item_uri": item_uri,
++                "track_name": track.name,
++                "rack_name": rack.name,
++                "requested_pad_note": pad_note,
++                "actual_pad_note": actual_pad_note,
++                "mismatch_reason": mismatch_reason,
++                "devices_signature_pre": list(pre_sig),
++                "devices_signature_post": list(post_sig),
++                "devices_changed": pre_sig != post_sig,
++                "pad_chain_count_after": len(target_pad.chains),
++                "worker_id": worker_id,
++                "lock_sequence": self._drain_lock_events(key, worker_id),
++            }
++        except Exception as e:
++            self.log_message("Error loading item to Drum Rack pad: {0}".format(str(e)))
++            self.log_message(traceback.format_exc())
++            raise
++        finally:
++            self._record_lock_event(key, "release", worker_id, pad_note=pad_note)
++            try:
++                lock.release()
++            except Exception:
++                pass
++
++    def _load_sample_to_drum_pad(self, track_index, rack_device_index, pad_note, item_uri, replace=False):
++        """Load by URI: thin wrapper that resolves URI to item, then delegates to locked path."""
++        app = self.application()
++        item = self._find_browser_item_by_uri(app.browser, item_uri)
++        if not item:
++            raise ValueError("Browser item with URI '{0}' not found".format(item_uri))
++        return self._load_item_to_drum_pad_locked(track_index, rack_device_index, pad_note, item, replace)
++
++    def _find_drum_pad_by_note(self, rack, pad_note):
++        """Return Drum Rack pad matching MIDI note, or None."""
++        try:
++            for pad in rack.drum_pads:
++                if pad.note == pad_note:
++                    return pad
++        except Exception:
++            return None
++        return None
++
++    def _ensure_drum_rack_on_track(self, track_index=-1, name="", create_if_missing=True):
++        """Idempotently ensure a Drum Rack exists on a MIDI track."""
++        try:
++            created_track = False
++            if track_index < 0:
++                self._song.create_midi_track(-1)
++                track_index = len(self._song.tracks) - 1
++                created_track = True
++            if track_index < 0 or track_index >= len(self._song.tracks):
++                raise IndexError("Track index out of range")
++
++            track = self._song.tracks[track_index]
++            if name and created_track:
++                track.name = name
++
++            for idx, device in enumerate(track.devices):
++                if device.can_have_drum_pads:
++                    if name and not created_track and track.name.startswith("MIDI"):
++                        track.name = name
++                    return {
++                        "track_index": track_index,
++                        "track_name": track.name,
++                        "rack_device_index": idx,
++                        "rack_name": device.name,
++                        "created_track": created_track,
++                        "created_rack": False,
++                    }
++
++            if not create_if_missing:
++                return {
++                    "track_index": track_index,
++                    "track_name": track.name,
++                    "rack_device_index": None,
++                    "rack_name": None,
++                    "created_track": created_track,
++                    "created_rack": False,
++                    "error": "no_drum_rack",
++                }
++
++            app = self.application()
++            rack_item = self._search_browser_by_name(app.browser, "Drum Rack", max_depth=8)
++            if rack_item is None:
++                rack_item = self._search_browser_by_name(app.browser, "Drum Rack.adg", max_depth=8)
++            if rack_item is None:
++                raise ValueError("Drum Rack browser item not found")
++
++            pre_count = len(track.devices)
++            self._song.view.selected_track = track
++            app.browser.load_item(rack_item)
++
++            rack_index = None
++            rack_name = None
++            for idx in range(pre_count, len(track.devices)):
++                device = track.devices[idx]
++                if device.can_have_drum_pads:
++                    rack_index = idx
++                    rack_name = device.name
++                    break
++            if rack_index is None:
++                for idx, device in enumerate(track.devices):
++                    if device.can_have_drum_pads:
++                        rack_index = idx
++                        rack_name = device.name
++                        break
++            if rack_index is None:
++                raise ValueError("Drum Rack load completed but no Drum Rack device was found")
++
++            return {
++                "track_index": track_index,
++                "track_name": track.name,
++                "rack_device_index": rack_index,
++                "rack_name": rack_name,
++                "created_track": created_track,
++                "created_rack": True,
++            }
++        except Exception as e:
++            self.log_message("Error ensuring Drum Rack: {0}".format(str(e)))
++            self.log_message(traceback.format_exc())
++            raise
++
++    def _verify_drum_pad_loaded(self, track_index, rack_device_index, pad_note, expected_filename=""):
++        """Verify that a Drum Rack pad has a loaded sampler chain."""
++        try:
++            if track_index < 0 or track_index >= len(self._song.tracks):
++                raise IndexError("Track index out of range")
++            track = self._song.tracks[track_index]
++            if rack_device_index < 0 or rack_device_index >= len(track.devices):
++                raise IndexError("Rack device index out of range")
++            rack = track.devices[rack_device_index]
++            if not rack.can_have_drum_pads:
++                raise ValueError("Device '{0}' is not a Drum Rack".format(rack.name))
++
++            def _expected_tokens(filename):
++                if not filename:
++                    return []
++                base = filename.replace("\\", "/").split("/")[-1].lower()
++                stem = base.rsplit(".", 1)[0]
++                return [base, stem]
++
++            def _pad_device_names(pad):
++                names = []
++                for chain in pad.chains:
++                    if chain.name:
++                        names.append(chain.name)
++                    for device in chain.devices:
++                        if device.name:
++                            names.append(device.name)
++                return names
++
++            def _matches_expected(names, filename):
++                tokens = _expected_tokens(filename)
++                if not tokens:
++                    return True
++                lowered = [n.lower() for n in names]
++                for token in tokens:
++                    for candidate in lowered:
++                        if token and (token in candidate or candidate in token):
++                            return True
++                return False
++
++            target_pad = self._find_drum_pad_by_note(rack, pad_note)
++            if target_pad is None:
++                raise ValueError("No Drum Rack pad with MIDI note {0}".format(pad_note))
++
++            target_names = _pad_device_names(target_pad)
++            if not target_pad.chains:
++                if expected_filename:
++                    for pad in rack.drum_pads:
++                        if pad.note == pad_note or not pad.chains:
++                            continue
++                        names = _pad_device_names(pad)
++                        if _matches_expected(names, expected_filename):
++                            return {
++                                "loaded": False,
++                                "mismatch_reason": "off_by_one",
++                                "requested_pad_note": pad_note,
++                                "actual_pad_note": pad.note,
++                                "device_names": names,
++                            }
++                return {
++                    "loaded": False,
++                    "mismatch_reason": "no_chain",
++                    "requested_pad_note": pad_note,
++                    "actual_pad_note": None,
++                    "device_names": [],
++                }
++
++            if expected_filename and not _matches_expected(target_names, expected_filename):
++                for pad in rack.drum_pads:
++                    if pad.note == pad_note or not pad.chains:
++                        continue
++                    names = _pad_device_names(pad)
++                    if _matches_expected(names, expected_filename):
++                        return {
++                            "loaded": False,
++                            "mismatch_reason": "off_by_one",
++                            "requested_pad_note": pad_note,
++                            "actual_pad_note": pad.note,
++                            "device_names": target_names,
++                        }
++                return {
++                    "loaded": False,
++                    "mismatch_reason": "wrong_filename",
++                    "requested_pad_note": pad_note,
++                    "actual_pad_note": pad_note,
++                    "device_names": target_names,
++                }
++
++            return {
++                "loaded": True,
++                "mismatch_reason": None,
++                "requested_pad_note": pad_note,
++                "actual_pad_note": pad_note,
++                "device_names": target_names,
++            }
++        except Exception as e:
++            self.log_message("Error verifying Drum Rack pad: {0}".format(str(e)))
++            self.log_message(traceback.format_exc())
++            raise
++
++    def _wait_for_load_complete(self, track_index, rack_device_index, pad_note, max_ticks=20):
++        """Poll a Drum Rack pad for a loaded chain after browser.load_item."""
++        try:
++            try:
++                max_ticks = int(max_ticks)
++            except Exception:
++                max_ticks = 20
++            if max_ticks < 0:
++                max_ticks = 0
++            last = None
++            for tick in range(max_ticks + 1):
++                last = self._verify_drum_pad_loaded(track_index, rack_device_index, pad_note, "")
++                last["ticks_waited"] = tick
++                if last.get("loaded"):
++                    return last
++                time.sleep(0.05)
++            return last
++        except Exception as e:
++            self.log_message("Error waiting for Drum Rack pad load: {0}".format(str(e)))
++            self.log_message(traceback.format_exc())
++            raise
++
++    def _find_browser_item_by_name_under_path(self, search_root, filename, max_depth=12):
++        """Find a loadable browser item by exact filename under a browser path."""
++        if not filename:
++            raise ValueError("filename is required")
++        if search_root not in ("User_folders/_lib_", "User_folders/Splice"):
++            raise ValueError("invalid_search_root: {0}".format(search_root))
++
++        app = self.application()
++        filename_lower = filename.lower()
++        path_parts = [p for p in search_root.split("/") if p]
++
++        def _item_name(item):
++            if hasattr(item, 'name') and item.name:
++                return item.name
++            return ""
++
++        def _children(item):
++            return self._browser_children(item)
++
++        def _user_folder_roots():
++            roots = []
++            try:
++                uf = app.browser.user_folders
++            except Exception:
++                return roots
++            for idx in range(128):
++                try:
++                    roots.append(uf[idx])
++                except Exception:
++                    break
++            return roots
++
++        current_item = None
++        current_children = []
++        if path_parts and path_parts[0].lower() == "user_folders":
++            current_children = _user_folder_roots()
++            for part in path_parts[1:]:
++                found = None
++                candidates = current_children if current_item is None else _children(current_item)
++                for child in candidates:
++                    if _item_name(child).lower() == part.lower():
++                        found = child
++                        break
++                if found is None:
++                    raise ValueError("Search root part '{0}' not found in {1}".format(part, search_root))
++                current_item = found
++                current_children = _children(current_item)
++        else:
++            raise ValueError("Unsupported search root: {0}".format(search_root))
++
++        def _search(node, depth):
++            if node is None or depth < 0:
++                return None
++            try:
++                name = _item_name(node)
++                if name.lower() == filename_lower:
++                    if hasattr(node, 'is_loadable') and node.is_loadable:
++                        return node
++                for child in _children(node):
++                    found = _search(child, depth - 1)
++                    if found is not None:
++                        return found
++            except Exception:
++                return None
++            return None
++
++        return _search(current_item, max_depth)
++
++    def _load_browser_sample_by_name(self, track_index, rack_device_index, pad_note,
++                                     filename, search_root="User_folders/Splice",
++                                     replace=False):
++        """Load a sample from User_folders/_lib_ or User_folders/Splice by filename."""
++        try:
++            item = self._find_browser_item_by_name_under_path(search_root, filename)
++            if item is None:
++                raise ValueError("Browser sample '{0}' not found under {1}".format(filename, search_root))
++            if not hasattr(item, 'uri') or not item.uri:
++                raise ValueError("Browser sample '{0}' has no URI".format(filename))
++            # Skip redundant URI lookup; we already have the item from name search.
++            result = self._load_item_to_drum_pad_locked(
++                track_index, rack_device_index, pad_note, item, replace)
++            result["search_root"] = search_root
++            result["filename"] = filename
++            return result
++        except Exception as e:
++            self.log_message("Error loading browser sample by name: {0}".format(str(e)))
++            self.log_message(traceback.format_exc())
++            raise
++     
++    def _search_browser_by_name(self, browser, filename, max_depth=12):
++        """Search all browser categories for a file by name (case-insensitive)."""
++        filename_lower = filename.lower()
++
++        def search_node(node, depth):
++            if depth <= 0:
++                return None
++            try:
++                name = node.name if hasattr(node, 'name') else ""
++                if name.lower() == filename_lower and hasattr(node, 'is_loadable') and node.is_loadable:
++                    return node
++                children = node.children if hasattr(node, 'children') else None
++                if not children:
++                    return None
++                for child in children:
++                    result = search_node(child, depth - 1)
++                    if result is not None:
++                        return result
++            except Exception:
++                pass
++            return None
++
++        search_roots = [
++            'user_folders', 'samples', 'user_library', 'sounds',
++            'drums', 'instruments', 'packs', 'current_project',
++        ]
++        for root_name in search_roots:
++            if not hasattr(browser, root_name):
++                continue
++            try:
++                root = getattr(browser, root_name)
++                if root is None:
++                    continue
++                # root can be a BrowserItem or iterable
++                try:
++                    children = root.children if hasattr(root, 'children') else root
++                    for child in (children or []):
++                        result = search_node(child, max_depth)
++                        if result is not None:
++                            return result
++                except Exception:
++                    result = search_node(root, max_depth)
++                    if result is not None:
++                        return result
++            except Exception as e:
++                self.log_message("search_browser_by_name error in {0}: {1}".format(root_name, str(e)))
++        return None
++
++    def _probe_environment(self):
++        """Read-only probe: Live version + schedule_message availability."""
++        try:
++            app = self.application()
++            result = {}
++
++            # Live version
++            try:
++                result["live_version"] = "{0}.{1}.{2}".format(
++                    app.get_major_version() if hasattr(app, 'get_major_version') else '?',
++                    app.get_minor_version() if hasattr(app, 'get_minor_version') else '?',
++                    app.get_bugfix_version() if hasattr(app, 'get_bugfix_version') else '?',
++                )
++            except Exception as e:
++                result["live_version"] = "error:{0}".format(str(e))
++
++            # schedule_message on ControlSurface (self)
++            result["control_surface_has_schedule_message"] = hasattr(self, 'schedule_message')
++
++            # schedule_message on Application
++            result["application_has_schedule_message"] = hasattr(app, 'schedule_message')
++
++            # Filter application dir for relevant attrs
++            try:
++                app_dir = [a for a in dir(app) if not a.startswith('_')]
++                result["application_dir_filtered"] = [
++                    a for a in app_dir
++                    if 'schedule' in a.lower() or 'version' in a.lower()
++                ]
++            except Exception:
++                result["application_dir_filtered"] = []
++
++            # Sample of browser attrs
++            try:
++                result["browser_attrs_sample"] = [
++                    a for a in dir(app.browser) if not a.startswith('_')
++                ][:15]
++            except Exception:
++                result["browser_attrs_sample"] = []
++
++            return result
++        except Exception as e:
++            self.log_message("Error in _probe_environment: {0}".format(str(e)))
++            raise
++
++    def _probe_export_capabilities(self):
++        """Read-only probe: verify all hypotheses for bounce/export pipeline."""
++        result = {}
++        import os, sys
++
++        # 1) subprocess module + osascript callable
++        try:
++            import subprocess
++            result["subprocess_importable"] = True
++            try:
++                p = subprocess.Popen(
++                    ["osascript", "-e", "return \"hello from osascript\""],
++                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++                out, err = p.communicate(timeout=5)
++                result["osascript_callable"] = (p.returncode == 0)
++                result["osascript_stdout"] = (out or b"").decode("utf-8", errors="replace").strip()
++                result["osascript_returncode"] = p.returncode
++            except Exception as e:
++                result["osascript_callable"] = False
++                result["osascript_error"] = str(e)
++        except Exception as e:
++            result["subprocess_importable"] = False
++            result["subprocess_error"] = str(e)
++
++        # 2) accessibility probe via osascript System Events
++        try:
++            import subprocess
++            p = subprocess.Popen(
++                ["osascript", "-e", 'tell application "System Events" to get name of first process'],
++                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++            out, err = p.communicate(timeout=5)
++            result["accessibility_probe_returncode"] = p.returncode
++            result["accessibility_probe_stdout"] = (out or b"").decode("utf-8", errors="replace").strip()
++            result["accessibility_probe_stderr"] = (err or b"").decode("utf-8", errors="replace").strip()
++            result["accessibility_granted"] = (p.returncode == 0)
++        except Exception as e:
++            result["accessibility_granted"] = False
++            result["accessibility_error"] = str(e)
++
++        # 3) Live API: create_audio_track, delete_track exist on song
++        try:
++            song = self._song
++            result["song_has_create_audio_track"] = hasattr(song, "create_audio_track")
++            result["song_has_create_midi_track"] = hasattr(song, "create_midi_track")
++            result["song_has_delete_track"] = hasattr(song, "delete_track")
++            result["song_has_loop"] = hasattr(song, "loop")
++            result["song_has_loop_start"] = hasattr(song, "loop_start")
++            result["song_has_loop_length"] = hasattr(song, "loop_length")
++            result["song_has_record_mode"] = hasattr(song, "record_mode")
++            result["song_has_session_record"] = hasattr(song, "session_record")
++            result["song_has_metronome"] = hasattr(song, "metronome")
++            result["song_has_back_to_arranger"] = hasattr(song, "back_to_arranger")
++            result["song_has_current_song_time"] = hasattr(song, "current_song_time")
++            result["song_has_master_track"] = hasattr(song, "master_track")
++            result["song_has_return_tracks"] = hasattr(song, "return_tracks")
++            try:
++                result["return_tracks_count"] = len(list(song.return_tracks))
++            except Exception:
++                result["return_tracks_count"] = -1
++        except Exception as e:
++            result["song_probe_error"] = str(e)
++
++        # 4) Track-level API surface
++        try:
++            if len(song.tracks) > 0:
++                t = song.tracks[0]
++                result["track_has_input_routing_type"] = hasattr(t, "current_input_routing_type")
++                result["track_has_input_routing_channel"] = hasattr(t, "current_input_routing_channel")
++                result["track_has_available_input_routing_types"] = hasattr(t, "available_input_routing_types")
++                result["track_has_freeze_track"] = hasattr(t, "freeze_track")
++                result["track_has_frozen_state"] = hasattr(t, "frozen_state")
++                result["track_has_is_freezable"] = hasattr(t, "is_freezable")
++                result["track_has_is_foldable"] = hasattr(t, "is_foldable")
++                result["track_has_arm"] = hasattr(t, "arm")
++                result["track_has_solo"] = hasattr(t, "solo")
++                result["track_has_mute"] = hasattr(t, "mute")
++                result["track_has_current_monitoring_state"] = hasattr(t, "current_monitoring_state")
++                result["track_has_can_be_armed"] = hasattr(t, "can_be_armed")
++                try:
++                    air_types = list(t.available_input_routing_types) if hasattr(t, 'available_input_routing_types') else []
++                    air_names = []
++                    for rt in air_types:
++                        if hasattr(rt, "display_name"):
++                            air_names.append(rt.display_name)
++                        else:
++                            air_names.append(str(rt))
++                    result["track0_available_input_routing_names"] = air_names[:25]
++                except Exception as e:
++                    result["track0_available_input_routing_error"] = str(e)
++        except Exception as e:
++            result["track_probe_error"] = str(e)
++
++        # 5) Audio track API
++        try:
++            audio_tracks = []
++            for i, t in enumerate(song.tracks):
++                if t.has_audio_input:
++                    audio_tracks.append(i)
++            result["audio_track_indices"] = audio_tracks[:5]
++            if audio_tracks:
++                at = song.tracks[audio_tracks[0]]
++                cs = at.clip_slots[0] if len(at.clip_slots) > 0 else None
++                result["audio_track0_has_clip_slots"] = bool(cs)
++                if cs and cs.has_clip:
++                    clip = cs.clip
++                    result["audio_track0_clip_has_file_path"] = hasattr(clip, "file_path")
++                    if hasattr(clip, "file_path"):
++                        try:
++                            result["audio_track0_clip_file_path_value"] = clip.file_path
++                        except Exception as e:
++                            result["audio_track0_clip_file_path_error"] = str(e)
++        except Exception as e:
++            result["audio_track_probe_error"] = str(e)
++
++        # 6) Document path
++        try:
++            app = self.application()
++            if hasattr(app, "get_document"):
++                doc = app.get_document()
++                result["app_has_get_document"] = True
++                result["doc_attrs"] = [a for a in dir(doc) if not a.startswith('_')][:20]
++            else:
++                result["app_has_get_document"] = False
++            result["song_has_file_path"] = hasattr(song, "file_path")
++            if hasattr(song, "file_path"):
++                try:
++                    result["song_file_path_value"] = song.file_path
++                except Exception as e:
++                    result["song_file_path_error"] = str(e)
++        except Exception as e:
++            result["doc_probe_error"] = str(e)
++
++        # 7) Mount writability
++        import time as _t
++        candidates = [
++            "/ocp/mnt/_lib_/agent-renders",
++        ]
++        result["mount_write_test"] = {}
++        for cand in candidates:
++            entry = {}
++            try:
++                if not os.path.isdir(cand):
++                    try:
++                        os.makedirs(cand, exist_ok=True)
++                        entry["created"] = True
++                    except Exception as e:
++                        entry["create_error"] = str(e)
++                test_file = cand + "/.write_probe_" + str(int(_t.time()))
++                try:
++                    fd = open(test_file, "wb")
++                    fd.write(b"probe")
++                    fd.close()
++                    entry["write_ok"] = True
++                    try:
++                        os.remove(test_file)
++                    except Exception:
++                        pass
++                except Exception as e:
++                    entry["write_ok"] = False
++                    entry["write_error"] = str(e)
++            except Exception as e:
++                entry["error"] = str(e)
++            result["mount_write_test"][cand] = entry
++
++        # 8) View access
++        try:
++            view = song.view
++            result["view_has_selected_track"] = hasattr(view, "selected_track")
++            result["view_has_selected_scene"] = hasattr(view, "selected_scene")
++            result["app_view_attrs"] = [a for a in dir(self.application().view) if not a.startswith('_')][:25]
++        except Exception as e:
++            result["view_probe_error"] = str(e)
++
++        # 9) Listeners
++        try:
++            result["song_has_loop_listener"] = hasattr(song, "add_loop_listener")
++            result["song_has_record_mode_listener"] = hasattr(song, "add_record_mode_listener")
++        except Exception as e:
++            result["listener_probe_error"] = str(e)
++
++        # 10) fcntl + flock
++        try:
++            import fcntl
++            result["fcntl_importable"] = True
++            result["fcntl_has_flock"] = hasattr(fcntl, "flock")
++            result["fcntl_has_LOCK_EX"] = hasattr(fcntl, "LOCK_EX")
++        except Exception as e:
++            result["fcntl_importable"] = False
++            result["fcntl_error"] = str(e)
++
++        # 11) Python version
++        result["python_version"] = sys.version
++        for mod in ["wave", "hashlib", "shutil", "json", "uuid", "secrets", "unicodedata"]:
++            try:
++                __import__(mod)
++                result["mod_" + mod] = True
++            except Exception as e:
++                result["mod_" + mod] = False
++
++        return result
++
++    def _probe_export_dialog_controls(self, max_depth=5):
++        """Read-only Export Audio dialog probe.
++
++        Opens Export Audio/Video via Cmd+Shift+R, snapshots the macOS
++        Accessibility UI element tree, then closes the dialog with Escape.
++        It must never press Render or start a file export.
++        """
++        result = {}
++        result["read_only"] = True
++        result["max_depth"] = max_depth
++        import subprocess
++        import time as _t
++
++        def run_osascript(script, timeout=10):
++            entry = {"script": script[:120]}
++            try:
++                p = subprocess.Popen(
++                    ["osascript", "-e", script],
++                    stdout=subprocess.PIPE,
++                    stderr=subprocess.PIPE,
++                )
++                out, err = p.communicate(timeout=timeout)
++                entry["returncode"] = p.returncode
++                entry["stdout"] = (out or b"").decode("utf-8", errors="replace").strip()
++                entry["stderr"] = (err or b"").decode("utf-8", errors="replace").strip()
++            except Exception as e:
++                entry["error"] = str(e)
++            return entry
++
++        def as_string(value):
++            try:
++                return str(value)
++            except Exception:
++                return ""
++
++        def applescript_string(value):
++            text = as_string(value)
++            return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
++
++        try:
++            try:
++                max_depth = int(max_depth)
++            except Exception:
++                max_depth = 5
++            if max_depth < 1:
++                max_depth = 1
++            if max_depth > 8:
++                max_depth = 8
++            result["max_depth"] = max_depth
++
++            # Detect Ableton/Live process. Prefer Beta if several variants exist.
++            detect_script = (
++                'tell application "System Events" to get name of every process '
++                'whose name contains "Ableton" or name contains "Live"'
++            )
++            detected = run_osascript(detect_script, 10)
++            result["detect_process"] = detected
++            raw_names = detected.get("stdout", "")
++            candidates = [n.strip() for n in raw_names.split(",") if n.strip()]
++            if not candidates:
++                result["error"] = "Ableton/Live process not detected via System Events"
++                return result
++            chosen = None
++            for name in candidates:
++                if "Beta" in name:
++                    chosen = name
++                    break
++            if chosen is None:
++                chosen = candidates[0]
++            result["ableton_process_candidates"] = candidates
++            result["ableton_process_name"] = chosen
++            proc = applescript_string(chosen)
++
++            # Close any stale Export dialog first. Escape is harmless if no dialog is open.
++            close_script = (
++                'tell application "System Events"\n'
++                '  tell process ' + proc + '\n'
++                '    set frontmost to true\n'
++                '    key code 53\n'
++                '  end tell\n'
++                'end tell'
++            )
++            result["pre_escape"] = run_osascript(close_script, 10)
++            _t.sleep(0.4)
++
++            # Open Export Audio/Video. This should only open the dialog, not render.
++            open_script = (
++                'tell application "System Events"\n'
++                '  tell process ' + proc + '\n'
++                '    set frontmost to true\n'
++                '    keystroke "r" using {command down, shift down}\n'
++                '  end tell\n'
++                'end tell'
++            )
++            result["open_dialog"] = run_osascript(open_script, 10)
++            _t.sleep(1.5)
++
++            windows_probe_script = (
++                'tell application "System Events"\n'
++                '  tell process ' + proc + '\n'
++                '    set frontmost to true\n'
++                '    try\n'
++                '      return name of every window\n'
++                '    on error errMsg\n'
++                '      return "WINDOW_PROBE_ERROR:" & errMsg\n'
++                '    end try\n'
++                '  end tell\n'
++                'end tell'
++            )
++            result["windows_after_shortcut"] = run_osascript(windows_probe_script, 10)
++
++            file_menu_items_script = (
++                'tell application "System Events"\n'
++                '  tell process ' + proc + '\n'
++                '    set frontmost to true\n'
++                '    try\n'
++                '      set itemNames to name of every menu item of menu "File" of menu bar 1\n'
++                '      set AppleScript\'s text item delimiters to linefeed\n'
++                '      return itemNames as text\n'
++                '    on error errMsg\n'
++                '      return "FILE_MENU_PROBE_ERROR:" & errMsg\n'
++                '    end try\n'
++                '  end tell\n'
++                'end tell'
++            )
++            result["file_menu_items"] = run_osascript(file_menu_items_script, 10)
++
++            if not result.get("windows_after_shortcut", {}).get("stdout"):
++                menu_open_script = (
++                    'tell application "System Events"\n'
++                    '  tell process ' + proc + '\n'
++                    '    set frontmost to true\n'
++                    '    set clickedName to ""\n'
++                    '    try\n'
++                    '      repeat with itemValue in menu items of menu "File" of menu bar 1\n'
++                    '        set itemName to ""\n'
++                    '        try\n'
++                    '          set itemName to name of itemValue as text\n'
++                    '        end try\n'
++                    '        if itemName contains "Export" then\n'
++                    '          set clickedName to itemName\n'
++                    '          click itemValue\n'
++                    '          exit repeat\n'
++                    '        end if\n'
++                    '      end repeat\n'
++                    '      return clickedName\n'
++                    '    on error errMsg\n'
++                    '      return "MENU_CLICK_ERROR:" & errMsg\n'
++                    '    end try\n'
++                    '  end tell\n'
++                    'end tell'
++                )
++                result["open_dialog_menu_fallback"] = run_osascript(menu_open_script, 10)
++                _t.sleep(1.5)
++                result["windows_after_menu_fallback"] = run_osascript(windows_probe_script, 10)
++
++            # Collect visible Accessibility elements using System Events' built-in
++            # "entire contents" traversal. This avoids recursive AppleScript handlers,
++            # which are fragile across host osascript versions.
++            collect_script = (
++                'tell application "System Events"\n'
++                '  tell process ' + proc + '\n'
++                '    set frontmost to true\n'
++                '    set allLines to {}\n'
++                '    set windowIndex to 0\n'
++                '    repeat with windowValue in windows\n'
++                '      set windowIndex to windowIndex + 1\n'
++                '      set windowNameValue to ""\n'
++                '      set windowRoleValue to ""\n'
++                '      try\n'
++                '        set windowNameValue to name of windowValue as text\n'
++                '      end try\n'
++                '      try\n'
++                '        set windowRoleValue to role of windowValue as text\n'
++                '      end try\n'
++                '      set windowLineValue to "0" & tab & ("window[" & (windowIndex as text) & "]") & tab & "window" & tab & windowRoleValue & tab & windowNameValue & tab & "" & tab & "" & tab & "" & tab & ""\n'
++                '      set allLines to allLines & {windowLineValue}\n'
++                '      try\n'
++                '        set elemsValue to entire contents of windowValue\n'
++                '      on error\n'
++                '        set elemsValue to {}\n'
++                '      end try\n'
++                '      set elemIndex to 0\n'
++                '      repeat with elemValue in elemsValue\n'
++                '        set elemIndex to elemIndex + 1\n'
++                '        set classValue to ""\n'
++                '        set roleValue to ""\n'
++                '        set nameValue to ""\n'
++                '        set descValue to ""\n'
++                '        set titleValue to ""\n'
++                '        set valueValue to ""\n'
++                '        set enabledValue to ""\n'
++                '        try\n'
++                '          set classValue to class of elemValue as text\n'
++                '        end try\n'
++                '        try\n'
++                '          set roleValue to role of elemValue as text\n'
++                '        end try\n'
++                '        try\n'
++                '          set nameValue to name of elemValue as text\n'
++                '        end try\n'
++                '        try\n'
++                '          set descValue to description of elemValue as text\n'
++                '        end try\n'
++                '        try\n'
++                '          set titleValue to title of elemValue as text\n'
++                '        end try\n'
++                '        try\n'
++                '          set valueValue to value of elemValue as text\n'
++                '        end try\n'
++                '        try\n'
++                '          set enabledValue to enabled of elemValue as text\n'
++                '        end try\n'
++                '        set lineValue to "0" & tab & ("window[" & (windowIndex as text) & "]/element[" & (elemIndex as text) & "]") & tab & classValue & tab & roleValue & tab & nameValue & tab & descValue & tab & titleValue & tab & valueValue & tab & enabledValue\n'
++                '        set allLines to allLines & {lineValue}\n'
++                '        if elemIndex > 1000 then exit repeat\n'
++                '      end repeat\n'
++                '    end repeat\n'
++                '    set AppleScript\'s text item delimiters to linefeed\n'
++                '    return allLines as text\n'
++                '  end tell\n'
++                'end tell'
++            )
++            collected = run_osascript(collect_script, 30)
++            result["control_tree_raw"] = collected
++
++            lines = []
++            stdout = collected.get("stdout", "")
++            if stdout:
++                for raw_line in stdout.splitlines():
++                    parts = raw_line.split("\t")
++                    if len(parts) >= 9:
++                        lines.append({
++                            "depth": parts[0],
++                            "path": parts[1],
++                            "class": parts[2],
++                            "role": parts[3],
++                            "name": parts[4],
++                            "description": parts[5],
++                            "title": parts[6],
++                            "value": parts[7],
++                            "enabled": parts[8],
++                        })
++                    else:
++                        lines.append({"raw": raw_line})
++            result["control_count"] = len(lines)
++            result["controls"] = lines[:500]
++
++            # Heuristics to quickly see whether useful Export controls are exposed.
++            interesting = []
++            needle_words = [
++                "Export", "Render", "Rendered", "Track", "Main", "Master",
++                "Individual", "Selected", "Normalize", "PCM", "Return", "Effects",
++                "Audio", "Video",
++            ]
++            for item in lines:
++                text = " ".join([
++                    as_string(item.get("class", "")),
++                    as_string(item.get("role", "")),
++                    as_string(item.get("name", "")),
++                    as_string(item.get("description", "")),
++                    as_string(item.get("title", "")),
++                    as_string(item.get("value", "")),
++                ])
++                for word in needle_words:
++                    if word.lower() in text.lower():
++                        interesting.append(item)
++                        break
++            result["interesting_controls"] = interesting[:120]
++            result["dialog_appeared_heuristic"] = (
++                len(lines) > 0 and len(interesting) > 0
++            )
++
++            # Close dialog with Escape and verify a second snapshot is smaller/different.
++            result["post_escape"] = run_osascript(close_script, 10)
++            _t.sleep(0.6)
++            windows_after = run_osascript(
++                'tell application "System Events" to tell process ' + proc + ' to get name of every window',
++                10,
++            )
++            result["windows_after_close"] = windows_after
++        except Exception as e:
++            result["error"] = str(e)
++            import traceback
++            result["traceback"] = traceback.format_exc()
++        return result
++
++    def _probe_routing_full(self, track_index=0):
++        """Probe full routing structure — categories, types, sub_routings, channels."""
++        result = {"track_index": track_index}
++        try:
++            t = self._song.tracks[track_index]
++            result["track_name"] = t.name
++            # All available_input_routing_types with full attrs
++            airt = list(t.available_input_routing_types)
++            entries = []
++            for rt in airt:
++                entry = {
++                    "display_name": getattr(rt, 'display_name', None),
++                    "category": getattr(rt, 'category', None),
++                    "attached_object_type": type(getattr(rt, 'attached_object', None)).__name__,
++                }
++                attached = getattr(rt, 'attached_object', None)
++                if attached is not None:
++                    if hasattr(attached, 'name'):
++                        try:
++                            entry["attached_object_name"] = attached.name
++                        except Exception:
++                            pass
++                entries.append(entry)
++            result["airt_full"] = entries
++            result["airt_count"] = len(entries)
++
++            # Categories enumeration — distinct values
++            categories = sorted(set(e["category"] for e in entries if e["category"] is not None), key=str)
++            result["categories"] = categories
++
++            # input_routings (plural) — different API?
++            try:
++                ir = list(t.input_routings) if hasattr(t, 'input_routings') else []
++                result["input_routings_count"] = len(ir)
++                result["input_routings_sample"] = [
++                    {
++                        "display_name": getattr(x, 'display_name', None),
++                        "category": getattr(x, 'category', None) if hasattr(x, 'category') else None,
++                        "type": type(x).__name__,
++                    }
++                    for x in ir[:10]
++                ]
++            except Exception as e:
++                result["input_routings_error"] = str(e)
++
++            # input_sub_routings
++            try:
++                isr = list(t.input_sub_routings) if hasattr(t, 'input_sub_routings') else []
++                result["input_sub_routings_count"] = len(isr)
++                result["input_sub_routings_sample"] = [
++                    {"display_name": getattr(x, 'display_name', None), "type": type(x).__name__}
++                    for x in isr[:10]
++                ]
++            except Exception as e:
++                result["input_sub_routings_error"] = str(e)
++
++            # current_input_routing — current value (display name)
++            cur = getattr(t, 'current_input_routing', None)
++            result["current_input_routing"] = cur
++
++            # current_input_sub_routing
++            cur_sub = getattr(t, 'current_input_sub_routing', None)
++            result["current_input_sub_routing"] = cur_sub
++        except Exception as e:
++            result["error"] = str(e)
++            import traceback
++            result["traceback"] = traceback.format_exc()
++        return result
++
++    def _probe_routing_current_value(self, track_index=0):
++        """Read current input_routing_type and channel display names for state inspection."""
++        result = {"track_index": track_index}
++        try:
++            t = self._song.tracks[track_index]
++            irt = getattr(t, 'input_routing_type', None)
++            result["input_routing_type_display"] = getattr(irt, 'display_name', None)
++            irc = getattr(t, 'input_routing_channel', None)
++            result["input_routing_channel_display"] = getattr(irc, 'display_name', None)
++            ort = getattr(t, 'output_routing_type', None)
++            result["output_routing_type_display"] = getattr(ort, 'display_name', None)
++            orc = getattr(t, 'output_routing_channel', None)
++            result["output_routing_channel_display"] = getattr(orc, 'display_name', None)
++            result["track_name"] = t.name
++        except Exception as e:
++            result["error"] = str(e)
++        return result
++
++    def _restore_routing_by_display_name(self, track_index, target_display_name):
++        """Find routing type with matching display_name in available_input_routing_types and set it."""
++        result = {"track_index": track_index, "target": target_display_name}
++        try:
++            t = self._song.tracks[track_index]
++            airt = list(t.available_input_routing_types)
++            match = None
++            for rt in airt:
++                if getattr(rt, 'display_name', '') == target_display_name:
++                    match = rt
++                    break
++            if match is None:
++                result["error"] = "no match for display_name '{0}'".format(target_display_name)
++                result["available_names"] = [getattr(rt, 'display_name', None) for rt in airt[:30]]
++                return result
++            t.input_routing_type = match
++            result["set_ok"] = True
++            result["after_display"] = getattr(t.input_routing_type, 'display_name', None)
++        except Exception as e:
++            result["error"] = str(e)
++        return result
++
++    def _smoke_resample(self, source_track_index=0, duration_seconds=4.0):
++        """Real-world resample smoke test:
++        1. Create temp audio track at end of song
++        2. Set its input routing — if source_track_index < 0, use 'Resampling' (master output);
++           otherwise route from source track at Post Mixer
++        3. Arm + record duration_seconds via session_record
++        4. Stop recording
++        5. Verify temp track has clip in slot 0; read clip.file_path
++        6. Delete temp track
++        Returns metadata + path."""
++        import time as _t
++        result = {"source_track_index": source_track_index, "duration_seconds": duration_seconds}
++        try:
++            song = self._song
++            n_before = len(song.tracks)
++            # 1) Create audio track at end
++            song.create_audio_track(-1)
++            temp_index = len(song.tracks) - 1
++            temp_track = song.tracks[temp_index]
++            result["temp_track_index"] = temp_index
++            result["temp_track_name"] = temp_track.name
++
++            try:
++                # 2) Routing setup: master (Resampling) vs specific track
++                airt = list(temp_track.available_input_routing_types)
++                target_rt = None
++                if source_track_index < 0:
++                    # MASTER mode — use Resampling
++                    result["mode"] = "master_resampling"
++                    for rt in airt:
++                        if getattr(rt, 'display_name', '') == "Resampling":
++                            target_rt = rt
++                            break
++                    if target_rt is None:
++                        result["error"] = "Resampling routing type not found"
++                        result["available_names"] = [getattr(rt, 'display_name', None) for rt in airt[:30]]
++                        song.delete_track(temp_index)
++                        return result
++                else:
++                    result["mode"] = "specific_track"
++                    src_track = song.tracks[source_track_index]
++                    src_name = src_track.name
++                    result["source_track_name"] = src_name
++                    for rt in airt:
++                        if getattr(rt, 'display_name', '') == src_name:
++                            target_rt = rt
++                            break
++                    if target_rt is None:
++                        for rt in airt:
++                            dn = getattr(rt, 'display_name', '')
++                            if src_name in dn:
++                                target_rt = rt
++                                break
++                    if target_rt is None:
++                        result["error"] = "no input routing type matching source track name"
++                        result["available_names"] = [getattr(rt, 'display_name', None) for rt in airt[:30]]
++                        song.delete_track(temp_index)
++                        return result
++
++                temp_track.input_routing_type = target_rt
++                result["set_input_type_display"] = getattr(temp_track.input_routing_type, 'display_name', None)
++
++                # 3) Try set channel to "Post Mixer" (only relevant for track-to-track routing)
++                airch = list(temp_track.available_input_routing_channels) if hasattr(temp_track, 'available_input_routing_channels') else []
++                result["airch_count"] = len(airch)
++                result["airch_names"] = [getattr(ch, 'display_name', None) for ch in airch[:10]]
++                if source_track_index >= 0:
++                    post_mixer = None
++                    for ch in airch:
++                        if getattr(ch, 'display_name', '') == "Post Mixer":
++                            post_mixer = ch
++                            break
++                    if post_mixer is not None:
++                        temp_track.input_routing_channel = post_mixer
++                        result["set_input_channel_display"] = getattr(temp_track.input_routing_channel, 'display_name', None)
++
++                # 4) Arm + monitor in
++                temp_track.current_monitoring_state = 0  # IN
++                temp_track.arm = True
++
++                # 5) Position transport at song start, enable session record, start playing, then fire empty slot
++                try:
++                    song.current_song_time = 0.0
++                except Exception as e:
++                    result["set_song_time_error"] = str(e)
++
++                # 5) Start transport, then enable session_record, then fire slot
++                song.start_playing()
++                _t.sleep(0.2)
++                song.session_record = True
++                _t.sleep(0.1)
++                cs = temp_track.clip_slots[0]
++                cs.fire()
++                _t.sleep(duration_seconds + 0.5)
++
++                # 6) Stop transport
++                song.stop_playing()
++                song.session_record = False
++                temp_track.arm = False
++                _t.sleep(1.0)  # let Live finalize WAV write
++
++                # 7) Inspect ALL clip slots + arrangement_clips for the recording
++                import os
++                slots_with_clips = []
++                for idx, cs2 in enumerate(temp_track.clip_slots):
++                    if cs2.has_clip:
++                        clip = cs2.clip
++                        info = {
++                            "slot_index": idx,
++                            "clip_name": clip.name,
++                            "clip_length": clip.length,
++                            "is_audio": getattr(clip, 'is_audio_clip', None),
++                        }
++                        if hasattr(clip, "file_path"):
++                            try:
++                                fp = clip.file_path
++                                info["file_path"] = fp
++                                info["file_exists"] = os.path.exists(fp) if fp else False
++                                if fp and os.path.exists(fp):
++                                    info["file_size"] = os.path.getsize(fp)
++                            except Exception as e:
++                                info["file_path_error"] = str(e)
++                        slots_with_clips.append(info)
++                result["session_clip_slots_with_clips"] = slots_with_clips
++                result["session_clip_slot_count"] = len(temp_track.clip_slots)
++
++                # Also scan arrangement_clips
++                try:
++                    ar_clips = list(temp_track.arrangement_clips) if hasattr(temp_track, 'arrangement_clips') else []
++                    arrangement_info = []
++                    for ac in ar_clips:
++                        info = {
++                            "name": ac.name,
++                            "length": getattr(ac, 'length', None),
++                            "is_audio": getattr(ac, 'is_audio_clip', None),
++                        }
++                        if hasattr(ac, "file_path"):
++                            try:
++                                fp = ac.file_path
++                                info["file_path"] = fp
++                                info["file_exists"] = os.path.exists(fp) if fp else False
++                                if fp and os.path.exists(fp):
++                                    info["file_size"] = os.path.getsize(fp)
++                            except Exception as e:
++                                info["file_path_error"] = str(e)
++                        arrangement_info.append(info)
++                    result["arrangement_clips"] = arrangement_info
++                except Exception as e:
++                    result["arrangement_clips_error"] = str(e)
++
++                result["has_clip"] = len(slots_with_clips) > 0 or len(result.get("arrangement_clips", [])) > 0
++            finally:
++                # 7) Cleanup: delete temp track
++                try:
++                    song.delete_track(temp_index)
++                    result["cleanup_ok"] = True
++                except Exception as e:
++                    result["cleanup_error"] = str(e)
++        except Exception as e:
++            result["error"] = str(e)
++            import traceback
++            result["traceback"] = traceback.format_exc()
++        return result
++
++    def _probe_track_api_dir(self, track_index=0):
++        """List all non-private attrs of a track and a clip — find Live 12 renamed APIs."""
++        result = {"track_index": track_index}
++        try:
++            t = self._song.tracks[track_index]
++            attrs = [a for a in dir(t) if not a.startswith('_')]
++            result["track_attrs"] = attrs
++            result["track_attrs_count"] = len(attrs)
++
++            # Filter for routing-related and freeze-related
++            result["routing_related"] = [a for a in attrs if 'rout' in a.lower() or 'input' in a.lower() or 'output' in a.lower() or 'monitor' in a.lower()]
++            result["freeze_related"] = [a for a in attrs if 'freeze' in a.lower() or 'frozen' in a.lower() or 'flatten' in a.lower()]
++
++            # Probe master track + return track separately
++            result["master_attrs_count"] = len([a for a in dir(self._song.master_track) if not a.startswith('_')])
++            if len(self._song.return_tracks) > 0:
++                rt = self._song.return_tracks[0]
++                result["return_track_attrs"] = [a for a in dir(rt) if not a.startswith('_')]
++                result["return_track_freeze_related"] = [a for a in dir(rt) if not a.startswith('_') and 'freeze' in a.lower()]
++
++            # Probe audio track if any
++            audio_track_idx = None
++            for i, tt in enumerate(self._song.tracks):
++                if tt.has_audio_input:
++                    audio_track_idx = i
++                    break
++            if audio_track_idx is not None:
++                at = self._song.tracks[audio_track_idx]
++                result["audio_track_index"] = audio_track_idx
++                result["audio_track_attrs"] = [a for a in dir(at) if not a.startswith('_')]
++                result["audio_track_routing_related"] = [a for a in result["audio_track_attrs"] if 'rout' in a.lower() or 'input' in a.lower() or 'output' in a.lower()]
++                # First clip slot probe
++                if len(at.clip_slots) > 0:
++                    cs = at.clip_slots[0]
++                    result["clip_slot_attrs"] = [a for a in dir(cs) if not a.startswith('_')]
++                    if cs.has_clip:
++                        clip = cs.clip
++                        result["clip_attrs"] = [a for a in dir(clip) if not a.startswith('_')]
++
++            # available_input_routing_types — what's the type of the elements
++            try:
++                airt = list(t.available_input_routing_types)
++                if airt:
++                    result["airt_first_type"] = type(airt[0]).__name__
++                    result["airt_first_attrs"] = [a for a in dir(airt[0]) if not a.startswith('_')]
++                    result["airt_first_display_name"] = getattr(airt[0], 'display_name', None)
++            except Exception as e:
++                result["airt_error"] = str(e)
++
++            # available_input_routing_channels (if exists)
++            try:
++                airch = list(t.available_input_routing_channels) if hasattr(t, 'available_input_routing_channels') else []
++                result["airch_count"] = len(airch)
++                if airch:
++                    result["airch_first_attrs"] = [a for a in dir(airch[0]) if not a.startswith('_')]
++                    result["airch_first_display_name"] = getattr(airch[0], 'display_name', None)
++            except Exception as e:
++                result["airch_error"] = str(e)
++        except Exception as e:
++            result["error"] = str(e)
++        return result
++
++    def _probe_routing_setter(self, track_index=0):
++        """Try to set input_routing_type to Resampling on an audio track without committing."""
++        result = {"track_index": track_index}
++        try:
++            t = self._song.tracks[track_index]
++            if not t.has_audio_input:
++                result["skipped"] = "track has no audio input (probably MIDI)"
++                return result
++            # Try Live 11 API first
++            try:
++                airt = list(t.available_input_routing_types)
++                resample_rt = None
++                for rt in airt:
++                    if getattr(rt, 'display_name', '').lower() == 'resampling':
++                        resample_rt = rt
++                        break
++                result["resampling_rt_found"] = resample_rt is not None
++                if resample_rt is None:
++                    return result
++
++                # Try Live 12 setter
++                if hasattr(t, 'input_routing_type'):
++                    try:
++                        old = t.input_routing_type
++                        result["live12_old_type_display"] = getattr(old, 'display_name', None)
++                        # Try setting
++                        t.input_routing_type = resample_rt
++                        result["live12_set_ok"] = True
++                        # Read back
++                        result["live12_after_set_display"] = getattr(t.input_routing_type, 'display_name', None)
++                        # Restore
++                        t.input_routing_type = old
++                        result["live12_restored_display"] = getattr(t.input_routing_type, 'display_name', None)
++                    except Exception as e:
++                        result["live12_set_error"] = str(e)
++                else:
++                    result["live12_input_routing_type_attr"] = False
++                # Try Live 11 setter
++                if hasattr(t, 'current_input_routing_type'):
++                    result["live11_attr_exists"] = True
++                else:
++                    result["live11_attr_exists"] = False
++            except Exception as e:
++                result["airt_error"] = str(e)
++        except Exception as e:
++            result["error"] = str(e)
++        return result
++
++    def _resolve_filepath_to_browser_path(self, filepath):
++        """Map a container/host filepath to an Ableton browser path.
++
++        Only /ocp/mnt/_lib_ and /ocp/mnt/Splice (and their host equivalents)
++        are supported. Any other prefix raises ValueError with typed error.
++        """
++        if not filepath:
++            raise ValueError("empty_path: filepath must not be empty")
++
++        # Normalize trailing slash
++        fp = filepath.rstrip("/")
++        for prefix, browser_root in self._FILEPATH_BROWSER_MAPPING:
++            if fp == prefix:
++                return browser_root
++            if fp.startswith(prefix + "/"):
++                rel = fp[len(prefix) + 1:]
++                return "{0}/{1}".format(browser_root, rel)
++
++        raise ValueError(
++            "unsupported_prefix: '{0}' is not under a supported mount. "
++            "Supported: /ocp/mnt/_lib_, /ocp/mnt/Splice".format(filepath)
++        )
++
+     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
+         """Find a browser item by its URI"""
+         try:
++            if isinstance(browser_or_item, (list, tuple)):
++                for child in browser_or_item:
++                    item = self._find_browser_item_by_uri(child, uri, max_depth, current_depth + 1)
++                    if item:
++                        return item
++                return None
++
+             # Check if this is the item we're looking for
+             if hasattr(browser_or_item, 'uri') and browser_or_item.uri == uri:
+                 return browser_or_item
+@@ -1060,15 +2946,19 @@ class AbletonMCP(ControlSurface):
+             
+             # Check if this is a browser with root categories
+             if hasattr(browser_or_item, 'instruments'):
+-                # Check all main categories
+-                categories = [
+-                    browser_or_item.instruments,
+-                    browser_or_item.sounds,
+-                    browser_or_item.drums,
+-                    browser_or_item.audio_effects,
+-                    browser_or_item.midi_effects,
+-                    browser_or_item.plugins,
++                # Check all load-relevant browser roots, including Samples and User Library.
++                category_names = [
++                    'instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects',
++                    'plugins', 'samples', 'user_library', 'current_project', 'clips',
++                    'packs', 'max_for_live', 'user_folders'
+                 ]
++                categories = []
++                for name in category_names:
++                    if hasattr(browser_or_item, name):
++                        try:
++                            categories.append(getattr(browser_or_item, name))
++                        except Exception:
++                            pass
+                 
+                 for category in categories:
+                     item = self._find_browser_item_by_uri(category, uri, max_depth, current_depth + 1)
+@@ -1078,8 +2968,9 @@ class AbletonMCP(ControlSurface):
+                 return None
+             
+             # Check if this item has children
+-            if hasattr(browser_or_item, 'children') and browser_or_item.children:
+-                for child in browser_or_item.children:
++            children = self._browser_children(browser_or_item)
++            if children:
++                for child in children:
+                     item = self._find_browser_item_by_uri(child, uri, max_depth, current_depth + 1)
+                     if item:
+                         return item
+@@ -1978,6 +3869,14 @@ class AbletonMCP(ControlSurface):
+             if not hasattr(app, 'browser') or app.browser is None:
+                 raise RuntimeError("Browser is not available in the Live application")
+             
++            def _item_children(item):
++                return self._browser_children(item)
++            
++            def _item_name(item, fallback):
++                if hasattr(item, 'name') and item.name:
++                    return item.name
++                return fallback
++            
+             # Log available browser attributes to help diagnose issues
+             browser_attrs = [attr for attr in dir(app.browser) if not attr.startswith('_')]
+             self.log_message("Available browser attributes: {0}".format(browser_attrs))
+@@ -1990,7 +3889,97 @@ class AbletonMCP(ControlSurface):
+             # Determine the root category
+             root_category = path_parts[0].lower()
+             current_item = None
+-            
++
++            # Special-case user_folders because generic traversal can close the Live TCP connection
++            if root_category == "user_folders":
++                try:
++                    uf = app.browser.user_folders
++                except Exception as e:
++                    self.log_message("Error accessing user_folders browser vector: {0}".format(str(e)))
++                    uf = None
++
++                def _user_folder_roots():
++                    roots = []
++                    if uf is None:
++                        return roots
++                    for idx in range(128):
++                        try:
++                            child = uf[idx]
++                        except Exception:
++                            break
++                        roots.append(child)
++                    return roots
++
++                roots = _user_folder_roots()
++
++                def _user_folder_child_info(child):
++                    return {
++                        "name": _item_name(child, "Unknown"),
++                        "is_folder": bool(self._browser_children(child)),
++                        "is_device": hasattr(child, 'is_device') and child.is_device,
++                        "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
++                        "uri": child.uri if hasattr(child, 'uri') else None
++                    }
++
++                if len(path_parts) == 1 and path_parts[0].lower() == "user_folders":
++                    result = {
++                        "path": path,
++                        "name": "User_folders",
++                        "uri": None,
++                        "is_folder": bool(roots),
++                        "is_device": False,
++                        "is_loadable": False,
++                        "items": [_user_folder_child_info(child) for child in roots]
++                    }
++                    self.log_message("Retrieved {0} items at path: {1}".format(len(result['items']), path))
++                    return result
++
++                current_item = None
++                current_children = roots
++                for i in range(1, len(path_parts)):
++                    part = path_parts[i]
++                    if not part:
++                        continue
++
++                    found = False
++                    candidates = current_children if current_item is None else self._browser_children(current_item)
++                    for child in candidates:
++                        if _item_name(child, '').lower() == part.lower():
++                            current_item = child
++                            current_children = self._browser_children(child)
++                            found = True
++                            break
++
++                    if not found:
++                        return {
++                            "path": path,
++                            "error": "Path part '{0}' not found".format(part),
++                            "items": []
++                        }
++
++                items = []
++                for child in self._browser_children(current_item):
++                    item_info = {
++                        "name": _item_name(child, "Unknown"),
++                        "is_folder": bool(self._browser_children(child)),
++                        "is_device": hasattr(child, 'is_device') and child.is_device,
++                        "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
++                        "uri": child.uri if hasattr(child, 'uri') else None
++                    }
++                    items.append(item_info)
++
++                result = {
++                    "path": path,
++                    "name": _item_name(current_item, path_parts[-1] if path_parts else path),
++                    "uri": current_item.uri if hasattr(current_item, 'uri') else None,
++                    "is_folder": bool(self._browser_children(current_item)),
++                    "is_device": hasattr(current_item, 'is_device') and current_item.is_device,
++                    "is_loadable": hasattr(current_item, 'is_loadable') and current_item.is_loadable,
++                    "items": items
++                }
++                self.log_message("Retrieved {0} items at path: {1}".format(len(items), path))
++                return result
++
+             # Check standard categories first
+             if root_category == "instruments" and hasattr(app.browser, 'instruments'):
+                 current_item = app.browser.instruments
+@@ -2029,7 +4018,8 @@ class AbletonMCP(ControlSurface):
+                 if not part:  # Skip empty parts
+                     continue
+                 
+-                if not hasattr(current_item, 'children'):
++                children = _item_children(current_item)
++                if not children:
+                     return {
+                         "path": path,
+                         "error": "Item at '{0}' has no children".format('/'.join(path_parts[:i])),
+@@ -2037,8 +4027,8 @@ class AbletonMCP(ControlSurface):
+                     }
+                 
+                 found = False
+-                for child in current_item.children:
+-                    if hasattr(child, 'name') and child.name.lower() == part.lower():
++                for child in children:
++                    if _item_name(child, '').lower() == part.lower():
+                         current_item = child
+                         found = True
+                         break
+@@ -2052,22 +4042,21 @@ class AbletonMCP(ControlSurface):
+             
+             # Get items at the current path
+             items = []
+-            if hasattr(current_item, 'children'):
+-                for child in current_item.children:
+-                    item_info = {
+-                        "name": child.name if hasattr(child, 'name') else "Unknown",
+-                        "is_folder": hasattr(child, 'children') and bool(child.children),
+-                        "is_device": hasattr(child, 'is_device') and child.is_device,
+-                        "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
+-                        "uri": child.uri if hasattr(child, 'uri') else None
+-                    }
+-                    items.append(item_info)
++            for child in _item_children(current_item):
++                item_info = {
++                    "name": _item_name(child, "Unknown"),
++                    "is_folder": bool(_item_children(child)),
++                    "is_device": hasattr(child, 'is_device') and child.is_device,
++                    "is_loadable": hasattr(child, 'is_loadable') and child.is_loadable,
++                    "uri": child.uri if hasattr(child, 'uri') else None
++                }
++                items.append(item_info)
+             
+             result = {
+                 "path": path,
+-                "name": current_item.name if hasattr(current_item, 'name') else "Unknown",
++                "name": _item_name(current_item, path_parts[-1] if path_parts else path),
+                 "uri": current_item.uri if hasattr(current_item, 'uri') else None,
+-                "is_folder": hasattr(current_item, 'children') and bool(current_item.children),
++                "is_folder": bool(_item_children(current_item)),
+                 "is_device": hasattr(current_item, 'is_device') and current_item.is_device,
+                 "is_loadable": hasattr(current_item, 'is_loadable') and current_item.is_loadable,
+                 "items": items
+diff --git a/MCP_Server/server.py b/MCP_Server/server.py
+index cacedf1..eb09750 100644
+--- a/MCP_Server/server.py
++++ b/MCP_Server/server.py
+@@ -3,6 +3,7 @@ from mcp.server.fastmcp import FastMCP, Context
+ import socket
+ import json
+ import logging
++import os
+ from dataclasses import dataclass
+ from contextlib import asynccontextmanager
+ from typing import AsyncIterator, Dict, Any, List, Union
+@@ -323,7 +324,10 @@ def get_ableton_connection():
+         for attempt in range(1, max_attempts + 1):
+             try:
+                 logger.info(f"Connecting to Ableton (attempt {attempt}/{max_attempts})...")
+-                _ableton_connection = AbletonConnection(host="localhost", port=9877)
++                _ableton_connection = AbletonConnection(
++                    host=os.getenv("ABLETON_HOST", "localhost"),
++                    port=int(os.getenv("ABLETON_PORT", "9877")),
++                )
+                 if _ableton_connection.connect():
+                     logger.info("Created new persistent connection to Ableton")
+                     
+@@ -647,6 +651,200 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
+         logger.error(f"Error loading instrument by URI: {str(e)}")
+         return f"Error loading instrument by URI: {str(e)}"
+ 
++
++@mcp.tool()
++def load_sample_to_simpler(ctx: Context, track_index: int, uri: str, device_index: int = 0) -> str:
++    """
++    Load a browser sample item into a selected Simpler or onto a MIDI track.
++
++    Parameters:
++    - track_index: Track number (1-based).
++    - uri: Browser item URI for the sample (e.g. query:Samples#FileId_...).
++    - device_index: Existing Simpler device number (1-based). Use 0 to load onto the track.
++    """
++    try:
++        ableton = get_ableton_connection()
++        ti = _to_zero_based(track_index, "track_index")
++        di = _optional_to_zero_based(device_index, "device_index")
++        result = ableton.send_command("load_sample_to_simpler", {
++            "track_index": ti,
++            "item_uri": uri,
++            "device_index": di,
++        })
++        return "Loaded sample '{0}' to track {1}. Devices: {2}".format(
++            result.get("item_name", uri),
++            track_index,
++            ", ".join(result.get("devices_after", [])),
++        )
++    except Exception as e:
++        logger.error(f"Error loading sample to Simpler: {str(e)}")
++        return f"Error loading sample to Simpler: {str(e)}"
++
++
++@mcp.tool()
++def load_sample_to_drum_pad(
++    ctx: Context,
++    track_index: int,
++    uri: str,
++    pad_note: int = 36,
++    rack_device_index: int = 1,
++    replace: bool = False,
++) -> str:
++    """
++    Load a browser sample item onto a Drum Rack pad, creating a Simpler chain.
++
++    Parameters:
++    - track_index: Track number (1-based).
++    - uri: Browser item URI for the sample (e.g. query:Samples#FileId_...).
++    - pad_note: MIDI note number for the Drum Rack pad (default 36 = C1 kick pad).
++    - rack_device_index: Drum Rack device number on the track (1-based).
++    - replace: Delete existing chains on the pad before loading.
++    """
++    try:
++        ableton = get_ableton_connection()
++        ti = _to_zero_based(track_index, "track_index")
++        rack_di = _to_zero_based(rack_device_index, "rack_device_index")
++        result = ableton.send_command("load_sample_to_drum_pad", {
++            "track_index": ti,
++            "item_uri": uri,
++            "pad_note": pad_note,
++            "rack_device_index": rack_di,
++            "replace": replace,
++        })
++        return "Loaded sample '{0}' to Drum Rack pad note {1} on track {2}".format(
++            result.get("item_name", uri), pad_note, track_index
++        )
++    except Exception as e:
++        logger.error(f"Error loading sample to Drum Rack pad: {str(e)}")
++        return f"Error loading sample to Drum Rack pad: {str(e)}"
++
++@mcp.tool()
++def load_browser_sample_by_name(
++    ctx: Context,
++    track_index: int,
++    filename: str,
++    search_root: str,
++    pad_note: int = 36,
++    rack_device_index: int = 1,
++    replace: bool = False,
++) -> str:
++    """Load a Splice/_lib_ sample onto a Drum Rack pad by filename.
++
++    NEVER pass raw filesystem paths. search_root MUST be 'User_folders/_lib_' or 'User_folders/Splice'.
++    """
++    valid_roots = {"User_folders/_lib_", "User_folders/Splice"}
++    if search_root not in valid_roots:
++        return f"Error: invalid_search_root '{search_root}'. Must be one of {valid_roots}"
++    try:
++        ableton = get_ableton_connection()
++        ti = _to_zero_based(track_index, "track_index")
++        rdi = _to_zero_based(rack_device_index, "rack_device_index")
++        result = ableton.send_command("load_browser_sample_by_name", {
++            "track_index": ti,
++            "rack_device_index": rdi,
++            "pad_note": pad_note,
++            "filename": filename,
++            "search_root": search_root,
++            "replace": replace,
++        })
++        return f"Loaded sample '{filename}' to pad {pad_note} on track {track_index}: {result}"
++    except Exception as e:
++        logger.error(f"Error loading sample by name: {str(e)}")
++        return f"Error loading sample by name: {str(e)}"
++
++
++@mcp.tool()
++def ensure_drum_rack_on_track(
++    ctx: Context,
++    track_index: int = 0,
++    name: str = "",
++    create_if_missing: bool = True,
++) -> str:
++    """Idempotently ensure a Drum Rack exists on a track.
++
++    track_index=0 means create new track. If track has Drum Rack, returns its index.
++    """
++    try:
++        ableton = get_ableton_connection()
++        ti = _to_zero_based(track_index, "track_index") if track_index > 0 else -1
++        result = ableton.send_command("ensure_drum_rack_on_track", {
++            "track_index": ti,
++            "name": name,
++            "create_if_missing": create_if_missing,
++        })
++        return f"Drum Rack ensured: {result}"
++    except Exception as e:
++        logger.error(f"Error ensuring Drum Rack: {str(e)}")
++        return f"Error ensuring Drum Rack: {str(e)}"
++
++
++@mcp.tool()
++def verify_drum_pad_loaded(
++    ctx: Context,
++    track_index: int,
++    rack_device_index: int,
++    pad_note: int,
++    expected_filename: str = "",
++) -> str:
++    """Verify a Drum Rack pad has the expected sample loaded.
++
++    Returns mismatch_reason in {None, no_chain, wrong_filename, off_by_one}.
++    """
++    try:
++        ableton = get_ableton_connection()
++        ti = _to_zero_based(track_index, "track_index")
++        rdi = _to_zero_based(rack_device_index, "rack_device_index")
++        result = ableton.send_command("verify_drum_pad_loaded", {
++            "track_index": ti,
++            "rack_device_index": rdi,
++            "pad_note": pad_note,
++            "expected_filename": expected_filename,
++        })
++        return f"Pad verification: {result}"
++    except Exception as e:
++        logger.error(f"Error verifying pad: {str(e)}")
++        return f"Error verifying pad: {str(e)}"
++
++
++@mcp.tool()
++def wait_for_load_complete(
++    ctx: Context,
++    track_index: int,
++    rack_device_index: int,
++    pad_note: int,
++    max_ticks: int = 20,
++) -> str:
++    """Poll a Drum Rack pad until a sampler chain is loaded."""
++    try:
++        ableton = get_ableton_connection()
++        ti = _to_zero_based(track_index, "track_index")
++        rdi = _to_zero_based(rack_device_index, "rack_device_index")
++        result = ableton.send_command("wait_for_load_complete", {
++            "track_index": ti,
++            "rack_device_index": rdi,
++            "pad_note": pad_note,
++            "max_ticks": max_ticks,
++        })
++        return f"Pad load wait result: {result}"
++    except Exception as e:
++        logger.error(f"Error waiting for pad load: {str(e)}")
++        return f"Error waiting for pad load: {str(e)}"
++
++
++@mcp.tool()
++def resolve_filepath_to_browser_path(ctx: Context, filepath: str) -> str:
++    """Convert a supported container/host sample filepath to an Ableton browser path."""
++    try:
++        ableton = get_ableton_connection()
++        result = ableton.send_command("resolve_filepath_to_browser_path", {
++            "filepath": filepath,
++        })
++        return f"Resolved browser path: {result}"
++    except Exception as e:
++        logger.error(f"Error resolving browser path: {str(e)}")
++        return f"Error resolving browser path: {str(e)}"
++
++
+ @mcp.tool()
+ def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
+     """
+@@ -1850,4 +2048,4 @@ def main():
+     mcp.run()
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()

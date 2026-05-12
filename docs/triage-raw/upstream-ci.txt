@@ -1,0 +1,41 @@
+=== .github/workflows ===
+ls: cannot access '.github/workflows/': No such file or directory
+
+=== Other CI configs ===
+Not found: .travis.yml
+Not found: .circleci/config.yml
+Not found: .gitlab-ci.yml
+Not found: azure-pipelines.yml
+
+=== Pre-commit ===
+ls: cannot access '.pre-commit-config.yaml': No such file or directory
+
+=== pyproject.toml [tool.*] sections ===
+[tool.setuptools]
+[tool.pytest.ini_options]
+
+=== Test runner config files ===
+Not found: pytest.ini
+Not found: tox.ini
+Not found: setup.cfg
+Not found: Makefile
+
+=== tests/ contents ===
+conftest.py
+__init__.py
+integration
+unit
+__init__.py
+test_arrangement_commands.py
+test_bar_beat_conversion.py
+test_browser_path_normalization.py
+test_core_indexing.py
+test_device_commands.py
+test_external_plugin_tools.py
+test_parameter_normalization.py
+test_plugin_aliases.py
+test_remote_script_helpers.py
+test_track_commands.py
+
+=== Editorconfig ===
+ls: cannot access '.editorconfig': No such file or directory
