@@ -3,9 +3,21 @@
 **Target repository**: [uisato/ableton-mcp-extended](https://github.com/uisato/ableton-mcp-extended)
 **Source branch**: [bunau-dj/ableton-mcp-extended:our-extensions](https://github.com/bunau-dj/ableton-mcp-extended/tree/our-extensions)
 **Branch parent**: `upstream/main @ 1116449`
-**Tests baseline**: 143 passing → 190 passing after these PRs (+47 new unit tests).
+**Tests baseline**: 143 passing → 178 passing on the deepest PR-D stack (+44 new unit tests across all five PRs; one BUSY-path test for a removed private helper was dropped in the pre-submission review).
 
 All five PRs were validated against a real Ableton Live 12.3 session: socket connection at `host.docker.internal:9877`, full Drum Rack workflow create→load→verify→wait→replace, browser URI resolution from the expanded root list, and regression checks against pre-existing upstream commands (`get_session_info`, `get_track_info`, `create_midi_track`, `set_track_name`, `create_clip`, `add_notes_to_clip`, `set_clip_name`, `fire_clip`, `stop_clip`, `set_track_volume`, `set_track_panning`, `duplicate_clip_to_arrangement`, `delete_arrangement_clip`, `delete_track`, `get_device_parameters`, `load_instrument_or_effect`).
+
+**Per-branch test counts** (each branch starts from `upstream/main @ 1116449`):
+
+| PR  | Branch (origin = `bunau-dj`)         | Tests pass | Δ vs baseline | Stacked on              |
+| --- | ------------------------------------ | ---------- | ------------- | ----------------------- |
+| A   | `pr/config-env-vars`                 | 146        | +3            | (independent)           |
+| B   | `pr/dispatch-and-load-foundation`    | 166        | +23           | (foundation)            |
+| C   | `pr/load-sample-to-simpler`          | 170        | +27           | PR-B                    |
+| D   | `pr/drum-rack-family`                | 178        | +35           | PR-C (which stacks B)   |
+| E   | `pr/find-browser-item-uri-expansion` | 172        | +29           | PR-B                    |
+
+Each branch ends with a small `fix(remote): pre-submission review fixes ...` commit applying targeted hunks from the post-feature review (TOCTOU fix on `_get_load_lock`, removal of an unused private state-machine helper, strict-bool guards on `replace`, lowered poll cadence in `_wait_for_load_complete`, and **socket-timeout sync** for browser-load commands — required for end-to-end correctness against a real Live runtime).
 
 ---
 
@@ -68,12 +80,12 @@ Fully backward-compatible. Existing users see no behavior change because both en
 
 ---
 
-## PR-B — `feat(remote): centralize dispatch + add browser-load concurrency primitives + state machine`
+## PR-B — `feat(remote): centralize dispatch + add browser-load concurrency primitives + drum-rack diagnostics`
 
-**Commits** (in order): `1cd14e0` (B3), `9c14c68` (B4), `8863bbd` (B5), `f99d439` (B6)
-**Effort**: L (~830 LOC across both files)
+**Commits** (in order): `1cd14e0` (B3), `9c14c68` (B4), `8863bbd` (B5), `f99d439` (B6) + 1 pre-submission fixup (TOCTOU on `_get_load_lock` + removal of an unused private state-machine helper, with its matching BUSY-path test).
+**Effort**: L (~700 LOC net across both files after dead-code removal)
 **Risk**: medium (touches core dispatch + adds shared state)
-**Tests added**: 24 (`test_command_dispatch.py` + `test_load_orchestration.py` + `test_browser_accessors.py` + `test_drum_rack_predicates.py`)
+**Tests added**: 23 (24 introduced, 1 removed with the unused helper) — `test_command_dispatch.py` + `test_load_orchestration.py` + `test_browser_accessors.py` + `test_drum_rack_predicates.py`
 
 ### Summary
 
@@ -128,7 +140,7 @@ Pure additive change. Existing command names continue to dispatch through the sa
 
 ## PR-C — `feat: load_sample_to_simpler tool + handler`
 
-**Commit**: `65b1b4e`
+**Commit**: `65b1b4e` + 1 pre-submission fixup (server.py 95s socket timeout for `load_sample_to_simpler`, required for end-to-end correctness).
 **Effort**: S (~70 LOC)
 **Risk**: low (single new command, isolated handler)
 **Tests added**: 4 (`tests/unit/test_load_sample_to_simpler.py`)
@@ -192,11 +204,11 @@ Pure new command. No existing behavior changes.
 
 ## PR-D — `feat: Drum Rack pad family (ensure / load / verify / wait)`
 
-**Commit**: `7d948f2`
+**Commit**: `7d948f2` + 1 pre-submission fixup (strict-bool `replace` guards, `_wait_for_load_complete` 50ms → 20ms with UI-block docstring warning, server.py 95s socket timeout for the four Drum Rack commands).
 **Effort**: M (~620 LOC across both files)
 **Risk**: medium (4 new tools + structured response shapes)
 **Tests added**: 8 (`tests/unit/test_drum_rack_family.py`)
-**Depends on**: PR-B (state machine + concurrency primitives), PR-C wiring pattern.
+**Depends on**: PR-B (concurrency primitives + Drum Rack diagnostic helpers), PR-C wiring pattern.
 
 ### Summary
 
@@ -264,7 +276,7 @@ def wait_for_load_complete(
 - `_load_item_to_drum_pad_locked(track_index, rack_device_index, pad_note, item, replace=False)` — full locked load path using PR-B primitives: pre/post device-signature snapshots, lock_sequence event trace, off-by-one diagnostics, and replace semantics. Returns a structured result with `loaded`, `mode`, `item_name`, `item_uri`, `track_name`, `rack_name`, `requested_pad_note`, `actual_pad_note`, `mismatch_reason`, `devices_signature_pre/post`, `devices_changed`, `pad_chain_count_after`, `worker_id`, `lock_sequence`.
 - `_load_sample_to_drum_pad(track_index, rack_device_index, pad_note, item_uri, replace=False)` — thin URI-resolving wrapper around `_load_item_to_drum_pad_locked`.
 - `_verify_drum_pad_loaded(track_index, rack_device_index, pad_note, expected_filename="")` — verification with filename matching, off-by-one cross-pad scan, and `no_chain` / `wrong_filename` / `off_by_one` mismatch reasons.
-- `_wait_for_load_complete(track_index, rack_device_index, pad_note, max_ticks=20)` — poll loop on top of `_verify_drum_pad_loaded` with 50 ms sleep between ticks.
+  - `_wait_for_load_complete(track_index, rack_device_index, pad_note, max_ticks=20)` — poll loop on top of `_verify_drum_pad_loaded` with 20 ms sleep between ticks. Runs on Live's main thread and briefly blocks the UI; the docstring warns callers to keep `max_ticks` small.
 
 ### Wiring
 
