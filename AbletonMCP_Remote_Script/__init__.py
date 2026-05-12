@@ -81,7 +81,16 @@ class AbletonMCP(ControlSurface):
         
         # Cache the song reference for easier access
         self._song = self.song()
-        
+
+        # Concurrency primitives for serialized browser-load operations.
+        # key = (track_index, rack_device_index) -> threading.Lock
+        self._load_locks = {}
+        # key = (track_index, rack_device_index) -> list of event dicts
+        self._lock_events = {}
+        # Monotonic worker id counter for lock sequence diagnostics
+        self._worker_seq = 0
+        self._worker_seq_lock = threading.Lock()
+
         # Start the socket server
         self.start_server()
         
@@ -438,9 +447,18 @@ class AbletonMCP(ControlSurface):
                     # If we're already on the main thread, execute directly
                     main_thread_task()
                 
-                # Wait for the response with a timeout
+                # Wait for the response with a timeout (extended for browser-load
+                # commands that legitimately take longer than other handlers).
+                _LONG_LOAD_COMMANDS = (
+                    "load_sample_to_drum_pad",
+                    "load_sample_to_simpler",
+                    "load_browser_sample_by_name",
+                    "ensure_drum_rack_on_track",
+                    "wait_for_load_complete",
+                )
+                _wait_timeout = 90.0 if command_type in _LONG_LOAD_COMMANDS else 10.0
                 try:
-                    task_response = response_queue.get(timeout=10.0)
+                    task_response = response_queue.get(timeout=_wait_timeout)
                     if task_response.get("status") == "error":
                         response["status"] = "error"
                         response["message"] = task_response.get("message", "Unknown error")
@@ -501,7 +519,41 @@ class AbletonMCP(ControlSurface):
             response["message"] = str(e)
         
         return response
-    
+
+    # ----- Concurrency primitives for serialized browser-load operations -----
+
+    def _next_worker_seq(self):
+        """Allocate a monotonically increasing worker id for lock sequence evidence."""
+        with self._worker_seq_lock:
+            self._worker_seq += 1
+            return self._worker_seq
+
+    def _record_lock_event(self, key, event, worker_id, **extra):
+        """Append a lock event with monotonic timestamp for race serialization evidence."""
+        try:
+            evt = {"event": event, "ts": time.time(), "worker_id": worker_id}
+            if extra:
+                evt.update(extra)
+            self._lock_events.setdefault(key, []).append(evt)
+        except Exception:
+            pass
+
+    def _drain_lock_events(self, key, worker_id):
+        """Return events for the given key+worker_id; oldest first; do not mutate other workers."""
+        try:
+            events = self._lock_events.get(key, [])
+            mine = [e for e in events if e.get("worker_id") == worker_id]
+            return mine
+        except Exception:
+            return []
+
+    def _get_load_lock(self, track_index, rack_device_index):
+        """Return (creating if needed) the per-(track, rack) threading.Lock."""
+        key = (track_index, rack_device_index)
+        if key not in self._load_locks:
+            self._load_locks[key] = threading.Lock()
+        return self._load_locks[key]
+
     # Arrangement helper methods
 
     def _get_arrangement_clip_info(self, clip):
