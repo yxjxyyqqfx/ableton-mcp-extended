@@ -66,6 +66,16 @@ VALID_COMMANDS = frozenset({
     "ensure_drum_rack_on_track",
     "verify_drum_pad_loaded",
     "wait_for_load_complete",
+    # F6 — fork-only probes (NOT submitted upstream; kept local for diagnostics)
+    "probe_environment",
+    "probe_export_capabilities",
+    "probe_export_dialog_controls",
+    "probe_track_api_dir",
+    "probe_routing_setter",
+    "probe_routing_current_value",
+    "restore_routing_by_display_name",
+    "smoke_resample",
+    "probe_routing_full",
 })
 
 def create_instance(c_instance):
@@ -468,6 +478,33 @@ class AbletonMCP(ControlSurface):
                             pn = params.get("pad_note", 36)
                             max_ticks = params.get("max_ticks", 20)
                             result = self._wait_for_load_complete(ti, rdi, pn, max_ticks)
+                        elif command_type == "probe_environment":
+                            result = self._probe_environment()
+                        elif command_type == "probe_export_capabilities":
+                            result = self._probe_export_capabilities()
+                        elif command_type == "probe_export_dialog_controls":
+                            max_depth = params.get("max_depth", 5)
+                            result = self._probe_export_dialog_controls(max_depth)
+                        elif command_type == "probe_track_api_dir":
+                            ti = params.get("track_index", 0)
+                            result = self._probe_track_api_dir(ti)
+                        elif command_type == "probe_routing_setter":
+                            ti = params.get("track_index", 0)
+                            result = self._probe_routing_setter(ti)
+                        elif command_type == "probe_routing_current_value":
+                            ti = params.get("track_index", 0)
+                            result = self._probe_routing_current_value(ti)
+                        elif command_type == "restore_routing_by_display_name":
+                            ti = params.get("track_index", 0)
+                            target_dn = params.get("target_display_name", "Ext. In")
+                            result = self._restore_routing_by_display_name(ti, target_dn)
+                        elif command_type == "smoke_resample":
+                            src_track = params.get("source_track_index", 0)
+                            dur = params.get("duration_seconds", 4.0)
+                            result = self._smoke_resample(src_track, dur)
+                        elif command_type == "probe_routing_full":
+                            ti = params.get("track_index", 0)
+                            result = self._probe_routing_full(ti)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -1234,6 +1271,947 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error waiting for Drum Rack pad load: {0}".format(str(e)))
             self.log_message(traceback.format_exc())
             raise
+
+    # ----- F6: Fork-only probes (diagnostic, NOT submitted upstream) -----
+
+    def _probe_environment(self):
+        """Read-only probe: Live version + schedule_message availability."""
+        try:
+            app = self.application()
+            result = {}
+
+            # Live version
+            try:
+                result["live_version"] = "{0}.{1}.{2}".format(
+                    app.get_major_version() if hasattr(app, 'get_major_version') else '?',
+                    app.get_minor_version() if hasattr(app, 'get_minor_version') else '?',
+                    app.get_bugfix_version() if hasattr(app, 'get_bugfix_version') else '?',
+                )
+            except Exception as e:
+                result["live_version"] = "error:{0}".format(str(e))
+
+            # schedule_message on ControlSurface (self)
+            result["control_surface_has_schedule_message"] = hasattr(self, 'schedule_message')
+
+            # schedule_message on Application
+            result["application_has_schedule_message"] = hasattr(app, 'schedule_message')
+
+            # Filter application dir for relevant attrs
+            try:
+                app_dir = [a for a in dir(app) if not a.startswith('_')]
+                result["application_dir_filtered"] = [
+                    a for a in app_dir
+                    if 'schedule' in a.lower() or 'version' in a.lower()
+                ]
+            except Exception:
+                result["application_dir_filtered"] = []
+
+            # Sample of browser attrs
+            try:
+                result["browser_attrs_sample"] = [
+                    a for a in dir(app.browser) if not a.startswith('_')
+                ][:15]
+            except Exception:
+                result["browser_attrs_sample"] = []
+
+            return result
+        except Exception as e:
+            self.log_message("Error in _probe_environment: {0}".format(str(e)))
+            raise
+
+    def _probe_export_capabilities(self):
+        """Read-only probe: verify all hypotheses for bounce/export pipeline."""
+        result = {}
+        import os, sys
+
+        # 1) subprocess module + osascript callable
+        try:
+            import subprocess
+            result["subprocess_importable"] = True
+            try:
+                p = subprocess.Popen(
+                    ["osascript", "-e", "return \"hello from osascript\""],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                out, err = p.communicate(timeout=5)
+                result["osascript_callable"] = (p.returncode == 0)
+                result["osascript_stdout"] = (out or b"").decode("utf-8", errors="replace").strip()
+                result["osascript_returncode"] = p.returncode
+            except Exception as e:
+                result["osascript_callable"] = False
+                result["osascript_error"] = str(e)
+        except Exception as e:
+            result["subprocess_importable"] = False
+            result["subprocess_error"] = str(e)
+
+        # 2) accessibility probe via osascript System Events
+        try:
+            import subprocess
+            p = subprocess.Popen(
+                ["osascript", "-e", 'tell application "System Events" to get name of first process'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = p.communicate(timeout=5)
+            result["accessibility_probe_returncode"] = p.returncode
+            result["accessibility_probe_stdout"] = (out or b"").decode("utf-8", errors="replace").strip()
+            result["accessibility_probe_stderr"] = (err or b"").decode("utf-8", errors="replace").strip()
+            result["accessibility_granted"] = (p.returncode == 0)
+        except Exception as e:
+            result["accessibility_granted"] = False
+            result["accessibility_error"] = str(e)
+
+        # 3) Live API: create_audio_track, delete_track exist on song
+        try:
+            song = self._song
+            result["song_has_create_audio_track"] = hasattr(song, "create_audio_track")
+            result["song_has_create_midi_track"] = hasattr(song, "create_midi_track")
+            result["song_has_delete_track"] = hasattr(song, "delete_track")
+            result["song_has_loop"] = hasattr(song, "loop")
+            result["song_has_loop_start"] = hasattr(song, "loop_start")
+            result["song_has_loop_length"] = hasattr(song, "loop_length")
+            result["song_has_record_mode"] = hasattr(song, "record_mode")
+            result["song_has_session_record"] = hasattr(song, "session_record")
+            result["song_has_metronome"] = hasattr(song, "metronome")
+            result["song_has_back_to_arranger"] = hasattr(song, "back_to_arranger")
+            result["song_has_current_song_time"] = hasattr(song, "current_song_time")
+            result["song_has_master_track"] = hasattr(song, "master_track")
+            result["song_has_return_tracks"] = hasattr(song, "return_tracks")
+            try:
+                result["return_tracks_count"] = len(list(song.return_tracks))
+            except Exception:
+                result["return_tracks_count"] = -1
+        except Exception as e:
+            result["song_probe_error"] = str(e)
+
+        # 4) Track-level API surface
+        try:
+            if len(song.tracks) > 0:
+                t = song.tracks[0]
+                result["track_has_input_routing_type"] = hasattr(t, "current_input_routing_type")
+                result["track_has_input_routing_channel"] = hasattr(t, "current_input_routing_channel")
+                result["track_has_available_input_routing_types"] = hasattr(t, "available_input_routing_types")
+                result["track_has_freeze_track"] = hasattr(t, "freeze_track")
+                result["track_has_frozen_state"] = hasattr(t, "frozen_state")
+                result["track_has_is_freezable"] = hasattr(t, "is_freezable")
+                result["track_has_is_foldable"] = hasattr(t, "is_foldable")
+                result["track_has_arm"] = hasattr(t, "arm")
+                result["track_has_solo"] = hasattr(t, "solo")
+                result["track_has_mute"] = hasattr(t, "mute")
+                result["track_has_current_monitoring_state"] = hasattr(t, "current_monitoring_state")
+                result["track_has_can_be_armed"] = hasattr(t, "can_be_armed")
+                try:
+                    air_types = list(t.available_input_routing_types) if hasattr(t, 'available_input_routing_types') else []
+                    air_names = []
+                    for rt in air_types:
+                        if hasattr(rt, "display_name"):
+                            air_names.append(rt.display_name)
+                        else:
+                            air_names.append(str(rt))
+                    result["track0_available_input_routing_names"] = air_names[:25]
+                except Exception as e:
+                    result["track0_available_input_routing_error"] = str(e)
+        except Exception as e:
+            result["track_probe_error"] = str(e)
+
+        # 5) Audio track API
+        try:
+            audio_tracks = []
+            for i, t in enumerate(song.tracks):
+                if t.has_audio_input:
+                    audio_tracks.append(i)
+            result["audio_track_indices"] = audio_tracks[:5]
+            if audio_tracks:
+                at = song.tracks[audio_tracks[0]]
+                cs = at.clip_slots[0] if len(at.clip_slots) > 0 else None
+                result["audio_track0_has_clip_slots"] = bool(cs)
+                if cs and cs.has_clip:
+                    clip = cs.clip
+                    result["audio_track0_clip_has_file_path"] = hasattr(clip, "file_path")
+                    if hasattr(clip, "file_path"):
+                        try:
+                            result["audio_track0_clip_file_path_value"] = clip.file_path
+                        except Exception as e:
+                            result["audio_track0_clip_file_path_error"] = str(e)
+        except Exception as e:
+            result["audio_track_probe_error"] = str(e)
+
+        # 6) Document path
+        try:
+            app = self.application()
+            if hasattr(app, "get_document"):
+                doc = app.get_document()
+                result["app_has_get_document"] = True
+                result["doc_attrs"] = [a for a in dir(doc) if not a.startswith('_')][:20]
+            else:
+                result["app_has_get_document"] = False
+            result["song_has_file_path"] = hasattr(song, "file_path")
+            if hasattr(song, "file_path"):
+                try:
+                    result["song_file_path_value"] = song.file_path
+                except Exception as e:
+                    result["song_file_path_error"] = str(e)
+        except Exception as e:
+            result["doc_probe_error"] = str(e)
+
+        # 7) Mount writability
+        import time as _t
+        candidates = [
+            "/ocp/mnt/_lib_/agent-renders",
+        ]
+        result["mount_write_test"] = {}
+        for cand in candidates:
+            entry = {}
+            try:
+                if not os.path.isdir(cand):
+                    try:
+                        os.makedirs(cand, exist_ok=True)
+                        entry["created"] = True
+                    except Exception as e:
+                        entry["create_error"] = str(e)
+                test_file = cand + "/.write_probe_" + str(int(_t.time()))
+                try:
+                    fd = open(test_file, "wb")
+                    fd.write(b"probe")
+                    fd.close()
+                    entry["write_ok"] = True
+                    try:
+                        os.remove(test_file)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    entry["write_ok"] = False
+                    entry["write_error"] = str(e)
+            except Exception as e:
+                entry["error"] = str(e)
+            result["mount_write_test"][cand] = entry
+
+        # 8) View access
+        try:
+            view = song.view
+            result["view_has_selected_track"] = hasattr(view, "selected_track")
+            result["view_has_selected_scene"] = hasattr(view, "selected_scene")
+            result["app_view_attrs"] = [a for a in dir(self.application().view) if not a.startswith('_')][:25]
+        except Exception as e:
+            result["view_probe_error"] = str(e)
+
+        # 9) Listeners
+        try:
+            result["song_has_loop_listener"] = hasattr(song, "add_loop_listener")
+            result["song_has_record_mode_listener"] = hasattr(song, "add_record_mode_listener")
+        except Exception as e:
+            result["listener_probe_error"] = str(e)
+
+        # 10) fcntl + flock
+        try:
+            import fcntl
+            result["fcntl_importable"] = True
+            result["fcntl_has_flock"] = hasattr(fcntl, "flock")
+            result["fcntl_has_LOCK_EX"] = hasattr(fcntl, "LOCK_EX")
+        except Exception as e:
+            result["fcntl_importable"] = False
+            result["fcntl_error"] = str(e)
+
+        # 11) Python version
+        result["python_version"] = sys.version
+        for mod in ["wave", "hashlib", "shutil", "json", "uuid", "secrets", "unicodedata"]:
+            try:
+                __import__(mod)
+                result["mod_" + mod] = True
+            except Exception as e:
+                result["mod_" + mod] = False
+
+        return result
+
+    def _probe_export_dialog_controls(self, max_depth=5):
+        """Read-only Export Audio dialog probe.
+
+        Opens Export Audio/Video via Cmd+Shift+R, snapshots the macOS
+        Accessibility UI element tree, then closes the dialog with Escape.
+        It must never press Render or start a file export.
+        """
+        result = {}
+        result["read_only"] = True
+        result["max_depth"] = max_depth
+        import subprocess
+        import time as _t
+
+        def run_osascript(script, timeout=10):
+            entry = {"script": script[:120]}
+            try:
+                p = subprocess.Popen(
+                    ["osascript", "-e", script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                out, err = p.communicate(timeout=timeout)
+                entry["returncode"] = p.returncode
+                entry["stdout"] = (out or b"").decode("utf-8", errors="replace").strip()
+                entry["stderr"] = (err or b"").decode("utf-8", errors="replace").strip()
+            except Exception as e:
+                entry["error"] = str(e)
+            return entry
+
+        def as_string(value):
+            try:
+                return str(value)
+            except Exception:
+                return ""
+
+        def applescript_string(value):
+            text = as_string(value)
+            return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+        try:
+            try:
+                max_depth = int(max_depth)
+            except Exception:
+                max_depth = 5
+            if max_depth < 1:
+                max_depth = 1
+            if max_depth > 8:
+                max_depth = 8
+            result["max_depth"] = max_depth
+
+            # Detect Ableton/Live process. Prefer Beta if several variants exist.
+            detect_script = (
+                'tell application "System Events" to get name of every process '
+                'whose name contains "Ableton" or name contains "Live"'
+            )
+            detected = run_osascript(detect_script, 10)
+            result["detect_process"] = detected
+            raw_names = detected.get("stdout", "")
+            candidates = [n.strip() for n in raw_names.split(",") if n.strip()]
+            if not candidates:
+                result["error"] = "Ableton/Live process not detected via System Events"
+                return result
+            chosen = None
+            for name in candidates:
+                if "Beta" in name:
+                    chosen = name
+                    break
+            if chosen is None:
+                chosen = candidates[0]
+            result["ableton_process_candidates"] = candidates
+            result["ableton_process_name"] = chosen
+            proc = applescript_string(chosen)
+
+            # Close any stale Export dialog first. Escape is harmless if no dialog is open.
+            close_script = (
+                'tell application "System Events"\n'
+                '  tell process ' + proc + '\n'
+                '    set frontmost to true\n'
+                '    key code 53\n'
+                '  end tell\n'
+                'end tell'
+            )
+            result["pre_escape"] = run_osascript(close_script, 10)
+            _t.sleep(0.4)
+
+            # Open Export Audio/Video. This should only open the dialog, not render.
+            open_script = (
+                'tell application "System Events"\n'
+                '  tell process ' + proc + '\n'
+                '    set frontmost to true\n'
+                '    keystroke "r" using {command down, shift down}\n'
+                '  end tell\n'
+                'end tell'
+            )
+            result["open_dialog"] = run_osascript(open_script, 10)
+            _t.sleep(1.5)
+
+            windows_probe_script = (
+                'tell application "System Events"\n'
+                '  tell process ' + proc + '\n'
+                '    set frontmost to true\n'
+                '    try\n'
+                '      return name of every window\n'
+                '    on error errMsg\n'
+                '      return "WINDOW_PROBE_ERROR:" & errMsg\n'
+                '    end try\n'
+                '  end tell\n'
+                'end tell'
+            )
+            result["windows_after_shortcut"] = run_osascript(windows_probe_script, 10)
+
+            file_menu_items_script = (
+                'tell application "System Events"\n'
+                '  tell process ' + proc + '\n'
+                '    set frontmost to true\n'
+                '    try\n'
+                '      set itemNames to name of every menu item of menu "File" of menu bar 1\n'
+                '      set AppleScript\'s text item delimiters to linefeed\n'
+                '      return itemNames as text\n'
+                '    on error errMsg\n'
+                '      return "FILE_MENU_PROBE_ERROR:" & errMsg\n'
+                '    end try\n'
+                '  end tell\n'
+                'end tell'
+            )
+            result["file_menu_items"] = run_osascript(file_menu_items_script, 10)
+
+            if not result.get("windows_after_shortcut", {}).get("stdout"):
+                menu_open_script = (
+                    'tell application "System Events"\n'
+                    '  tell process ' + proc + '\n'
+                    '    set frontmost to true\n'
+                    '    set clickedName to ""\n'
+                    '    try\n'
+                    '      repeat with itemValue in menu items of menu "File" of menu bar 1\n'
+                    '        set itemName to ""\n'
+                    '        try\n'
+                    '          set itemName to name of itemValue as text\n'
+                    '        end try\n'
+                    '        if itemName contains "Export" then\n'
+                    '          set clickedName to itemName\n'
+                    '          click itemValue\n'
+                    '          exit repeat\n'
+                    '        end if\n'
+                    '      end repeat\n'
+                    '      return clickedName\n'
+                    '    on error errMsg\n'
+                    '      return "MENU_CLICK_ERROR:" & errMsg\n'
+                    '    end try\n'
+                    '  end tell\n'
+                    'end tell'
+                )
+                result["open_dialog_menu_fallback"] = run_osascript(menu_open_script, 10)
+                _t.sleep(1.5)
+                result["windows_after_menu_fallback"] = run_osascript(windows_probe_script, 10)
+
+            # Collect visible Accessibility elements using System Events' built-in
+            # "entire contents" traversal. This avoids recursive AppleScript handlers,
+            # which are fragile across host osascript versions.
+            collect_script = (
+                'tell application "System Events"\n'
+                '  tell process ' + proc + '\n'
+                '    set frontmost to true\n'
+                '    set allLines to {}\n'
+                '    set windowIndex to 0\n'
+                '    repeat with windowValue in windows\n'
+                '      set windowIndex to windowIndex + 1\n'
+                '      set windowNameValue to ""\n'
+                '      set windowRoleValue to ""\n'
+                '      try\n'
+                '        set windowNameValue to name of windowValue as text\n'
+                '      end try\n'
+                '      try\n'
+                '        set windowRoleValue to role of windowValue as text\n'
+                '      end try\n'
+                '      set windowLineValue to "0" & tab & ("window[" & (windowIndex as text) & "]") & tab & "window" & tab & windowRoleValue & tab & windowNameValue & tab & "" & tab & "" & tab & "" & tab & ""\n'
+                '      set allLines to allLines & {windowLineValue}\n'
+                '      try\n'
+                '        set elemsValue to entire contents of windowValue\n'
+                '      on error\n'
+                '        set elemsValue to {}\n'
+                '      end try\n'
+                '      set elemIndex to 0\n'
+                '      repeat with elemValue in elemsValue\n'
+                '        set elemIndex to elemIndex + 1\n'
+                '        set classValue to ""\n'
+                '        set roleValue to ""\n'
+                '        set nameValue to ""\n'
+                '        set descValue to ""\n'
+                '        set titleValue to ""\n'
+                '        set valueValue to ""\n'
+                '        set enabledValue to ""\n'
+                '        try\n'
+                '          set classValue to class of elemValue as text\n'
+                '        end try\n'
+                '        try\n'
+                '          set roleValue to role of elemValue as text\n'
+                '        end try\n'
+                '        try\n'
+                '          set nameValue to name of elemValue as text\n'
+                '        end try\n'
+                '        try\n'
+                '          set descValue to description of elemValue as text\n'
+                '        end try\n'
+                '        try\n'
+                '          set titleValue to title of elemValue as text\n'
+                '        end try\n'
+                '        try\n'
+                '          set valueValue to value of elemValue as text\n'
+                '        end try\n'
+                '        try\n'
+                '          set enabledValue to enabled of elemValue as text\n'
+                '        end try\n'
+                '        set lineValue to "0" & tab & ("window[" & (windowIndex as text) & "]/element[" & (elemIndex as text) & "]") & tab & classValue & tab & roleValue & tab & nameValue & tab & descValue & tab & titleValue & tab & valueValue & tab & enabledValue\n'
+                '        set allLines to allLines & {lineValue}\n'
+                '        if elemIndex > 1000 then exit repeat\n'
+                '      end repeat\n'
+                '    end repeat\n'
+                '    set AppleScript\'s text item delimiters to linefeed\n'
+                '    return allLines as text\n'
+                '  end tell\n'
+                'end tell'
+            )
+            collected = run_osascript(collect_script, 30)
+            result["control_tree_raw"] = collected
+
+            lines = []
+            stdout = collected.get("stdout", "")
+            if stdout:
+                for raw_line in stdout.splitlines():
+                    parts = raw_line.split("\t")
+                    if len(parts) >= 9:
+                        lines.append({
+                            "depth": parts[0],
+                            "path": parts[1],
+                            "class": parts[2],
+                            "role": parts[3],
+                            "name": parts[4],
+                            "description": parts[5],
+                            "title": parts[6],
+                            "value": parts[7],
+                            "enabled": parts[8],
+                        })
+                    else:
+                        lines.append({"raw": raw_line})
+            result["control_count"] = len(lines)
+            result["controls"] = lines[:500]
+
+            # Heuristics to quickly see whether useful Export controls are exposed.
+            interesting = []
+            needle_words = [
+                "Export", "Render", "Rendered", "Track", "Main", "Master",
+                "Individual", "Selected", "Normalize", "PCM", "Return", "Effects",
+                "Audio", "Video",
+            ]
+            for item in lines:
+                text = " ".join([
+                    as_string(item.get("class", "")),
+                    as_string(item.get("role", "")),
+                    as_string(item.get("name", "")),
+                    as_string(item.get("description", "")),
+                    as_string(item.get("title", "")),
+                    as_string(item.get("value", "")),
+                ])
+                for word in needle_words:
+                    if word.lower() in text.lower():
+                        interesting.append(item)
+                        break
+            result["interesting_controls"] = interesting[:120]
+            result["dialog_appeared_heuristic"] = (
+                len(lines) > 0 and len(interesting) > 0
+            )
+
+            # Close dialog with Escape and verify a second snapshot is smaller/different.
+            result["post_escape"] = run_osascript(close_script, 10)
+            _t.sleep(0.6)
+            windows_after = run_osascript(
+                'tell application "System Events" to tell process ' + proc + ' to get name of every window',
+                10,
+            )
+            result["windows_after_close"] = windows_after
+        except Exception as e:
+            result["error"] = str(e)
+            import traceback
+            result["traceback"] = traceback.format_exc()
+        return result
+
+    def _probe_routing_full(self, track_index=0):
+        """Probe full routing structure — categories, types, sub_routings, channels."""
+        result = {"track_index": track_index}
+        try:
+            t = self._song.tracks[track_index]
+            result["track_name"] = t.name
+            # All available_input_routing_types with full attrs
+            airt = list(t.available_input_routing_types)
+            entries = []
+            for rt in airt:
+                entry = {
+                    "display_name": getattr(rt, 'display_name', None),
+                    "category": getattr(rt, 'category', None),
+                    "attached_object_type": type(getattr(rt, 'attached_object', None)).__name__,
+                }
+                attached = getattr(rt, 'attached_object', None)
+                if attached is not None:
+                    if hasattr(attached, 'name'):
+                        try:
+                            entry["attached_object_name"] = attached.name
+                        except Exception:
+                            pass
+                entries.append(entry)
+            result["airt_full"] = entries
+            result["airt_count"] = len(entries)
+
+            # Categories enumeration — distinct values
+            categories = sorted(set(e["category"] for e in entries if e["category"] is not None), key=str)
+            result["categories"] = categories
+
+            # input_routings (plural) — different API?
+            try:
+                ir = list(t.input_routings) if hasattr(t, 'input_routings') else []
+                result["input_routings_count"] = len(ir)
+                result["input_routings_sample"] = [
+                    {
+                        "display_name": getattr(x, 'display_name', None),
+                        "category": getattr(x, 'category', None) if hasattr(x, 'category') else None,
+                        "type": type(x).__name__,
+                    }
+                    for x in ir[:10]
+                ]
+            except Exception as e:
+                result["input_routings_error"] = str(e)
+
+            # input_sub_routings
+            try:
+                isr = list(t.input_sub_routings) if hasattr(t, 'input_sub_routings') else []
+                result["input_sub_routings_count"] = len(isr)
+                result["input_sub_routings_sample"] = [
+                    {"display_name": getattr(x, 'display_name', None), "type": type(x).__name__}
+                    for x in isr[:10]
+                ]
+            except Exception as e:
+                result["input_sub_routings_error"] = str(e)
+
+            # current_input_routing — current value (display name)
+            cur = getattr(t, 'current_input_routing', None)
+            result["current_input_routing"] = cur
+
+            # current_input_sub_routing
+            cur_sub = getattr(t, 'current_input_sub_routing', None)
+            result["current_input_sub_routing"] = cur_sub
+        except Exception as e:
+            result["error"] = str(e)
+            import traceback
+            result["traceback"] = traceback.format_exc()
+        return result
+
+    def _probe_routing_current_value(self, track_index=0):
+        """Read current input_routing_type and channel display names for state inspection."""
+        result = {"track_index": track_index}
+        try:
+            t = self._song.tracks[track_index]
+            irt = getattr(t, 'input_routing_type', None)
+            result["input_routing_type_display"] = getattr(irt, 'display_name', None)
+            irc = getattr(t, 'input_routing_channel', None)
+            result["input_routing_channel_display"] = getattr(irc, 'display_name', None)
+            ort = getattr(t, 'output_routing_type', None)
+            result["output_routing_type_display"] = getattr(ort, 'display_name', None)
+            orc = getattr(t, 'output_routing_channel', None)
+            result["output_routing_channel_display"] = getattr(orc, 'display_name', None)
+            result["track_name"] = t.name
+        except Exception as e:
+            result["error"] = str(e)
+        return result
+
+    def _restore_routing_by_display_name(self, track_index, target_display_name):
+        """Find routing type with matching display_name in available_input_routing_types and set it."""
+        result = {"track_index": track_index, "target": target_display_name}
+        try:
+            t = self._song.tracks[track_index]
+            airt = list(t.available_input_routing_types)
+            match = None
+            for rt in airt:
+                if getattr(rt, 'display_name', '') == target_display_name:
+                    match = rt
+                    break
+            if match is None:
+                result["error"] = "no match for display_name '{0}'".format(target_display_name)
+                result["available_names"] = [getattr(rt, 'display_name', None) for rt in airt[:30]]
+                return result
+            t.input_routing_type = match
+            result["set_ok"] = True
+            result["after_display"] = getattr(t.input_routing_type, 'display_name', None)
+        except Exception as e:
+            result["error"] = str(e)
+        return result
+
+    def _smoke_resample(self, source_track_index=0, duration_seconds=4.0):
+        """Real-world resample smoke test:
+        1. Create temp audio track at end of song
+        2. Set its input routing — if source_track_index < 0, use 'Resampling' (master output);
+           otherwise route from source track at Post Mixer
+        3. Arm + record duration_seconds via session_record
+        4. Stop recording
+        5. Verify temp track has clip in slot 0; read clip.file_path
+        6. Delete temp track
+        Returns metadata + path."""
+        import time as _t
+        result = {"source_track_index": source_track_index, "duration_seconds": duration_seconds}
+        try:
+            song = self._song
+            n_before = len(song.tracks)
+            # 1) Create audio track at end
+            song.create_audio_track(-1)
+            temp_index = len(song.tracks) - 1
+            temp_track = song.tracks[temp_index]
+            result["temp_track_index"] = temp_index
+            result["temp_track_name"] = temp_track.name
+
+            try:
+                # 2) Routing setup: master (Resampling) vs specific track
+                airt = list(temp_track.available_input_routing_types)
+                target_rt = None
+                if source_track_index < 0:
+                    # MASTER mode — use Resampling
+                    result["mode"] = "master_resampling"
+                    for rt in airt:
+                        if getattr(rt, 'display_name', '') == "Resampling":
+                            target_rt = rt
+                            break
+                    if target_rt is None:
+                        result["error"] = "Resampling routing type not found"
+                        result["available_names"] = [getattr(rt, 'display_name', None) for rt in airt[:30]]
+                        song.delete_track(temp_index)
+                        return result
+                else:
+                    result["mode"] = "specific_track"
+                    src_track = song.tracks[source_track_index]
+                    src_name = src_track.name
+                    result["source_track_name"] = src_name
+                    for rt in airt:
+                        if getattr(rt, 'display_name', '') == src_name:
+                            target_rt = rt
+                            break
+                    if target_rt is None:
+                        for rt in airt:
+                            dn = getattr(rt, 'display_name', '')
+                            if src_name in dn:
+                                target_rt = rt
+                                break
+                    if target_rt is None:
+                        result["error"] = "no input routing type matching source track name"
+                        result["available_names"] = [getattr(rt, 'display_name', None) for rt in airt[:30]]
+                        song.delete_track(temp_index)
+                        return result
+
+                temp_track.input_routing_type = target_rt
+                result["set_input_type_display"] = getattr(temp_track.input_routing_type, 'display_name', None)
+
+                # 3) Try set channel to "Post Mixer" (only relevant for track-to-track routing)
+                airch = list(temp_track.available_input_routing_channels) if hasattr(temp_track, 'available_input_routing_channels') else []
+                result["airch_count"] = len(airch)
+                result["airch_names"] = [getattr(ch, 'display_name', None) for ch in airch[:10]]
+                if source_track_index >= 0:
+                    post_mixer = None
+                    for ch in airch:
+                        if getattr(ch, 'display_name', '') == "Post Mixer":
+                            post_mixer = ch
+                            break
+                    if post_mixer is not None:
+                        temp_track.input_routing_channel = post_mixer
+                        result["set_input_channel_display"] = getattr(temp_track.input_routing_channel, 'display_name', None)
+
+                # 4) Arm + monitor in
+                temp_track.current_monitoring_state = 0  # IN
+                temp_track.arm = True
+
+                # 5) Position transport at song start, enable session record, start playing, then fire empty slot
+                try:
+                    song.current_song_time = 0.0
+                except Exception as e:
+                    result["set_song_time_error"] = str(e)
+
+                # 5) Start transport, then enable session_record, then fire slot
+                song.start_playing()
+                _t.sleep(0.2)
+                song.session_record = True
+                _t.sleep(0.1)
+                cs = temp_track.clip_slots[0]
+                cs.fire()
+                _t.sleep(duration_seconds + 0.5)
+
+                # 6) Stop transport
+                song.stop_playing()
+                song.session_record = False
+                temp_track.arm = False
+                _t.sleep(1.0)  # let Live finalize WAV write
+
+                # 7) Inspect ALL clip slots + arrangement_clips for the recording
+                import os
+                slots_with_clips = []
+                for idx, cs2 in enumerate(temp_track.clip_slots):
+                    if cs2.has_clip:
+                        clip = cs2.clip
+                        info = {
+                            "slot_index": idx,
+                            "clip_name": clip.name,
+                            "clip_length": clip.length,
+                            "is_audio": getattr(clip, 'is_audio_clip', None),
+                        }
+                        if hasattr(clip, "file_path"):
+                            try:
+                                fp = clip.file_path
+                                info["file_path"] = fp
+                                info["file_exists"] = os.path.exists(fp) if fp else False
+                                if fp and os.path.exists(fp):
+                                    info["file_size"] = os.path.getsize(fp)
+                            except Exception as e:
+                                info["file_path_error"] = str(e)
+                        slots_with_clips.append(info)
+                result["session_clip_slots_with_clips"] = slots_with_clips
+                result["session_clip_slot_count"] = len(temp_track.clip_slots)
+
+                # Also scan arrangement_clips
+                try:
+                    ar_clips = list(temp_track.arrangement_clips) if hasattr(temp_track, 'arrangement_clips') else []
+                    arrangement_info = []
+                    for ac in ar_clips:
+                        info = {
+                            "name": ac.name,
+                            "length": getattr(ac, 'length', None),
+                            "is_audio": getattr(ac, 'is_audio_clip', None),
+                        }
+                        if hasattr(ac, "file_path"):
+                            try:
+                                fp = ac.file_path
+                                info["file_path"] = fp
+                                info["file_exists"] = os.path.exists(fp) if fp else False
+                                if fp and os.path.exists(fp):
+                                    info["file_size"] = os.path.getsize(fp)
+                            except Exception as e:
+                                info["file_path_error"] = str(e)
+                        arrangement_info.append(info)
+                    result["arrangement_clips"] = arrangement_info
+                except Exception as e:
+                    result["arrangement_clips_error"] = str(e)
+
+                result["has_clip"] = len(slots_with_clips) > 0 or len(result.get("arrangement_clips", [])) > 0
+            finally:
+                # 7) Cleanup: delete temp track
+                try:
+                    song.delete_track(temp_index)
+                    result["cleanup_ok"] = True
+                except Exception as e:
+                    result["cleanup_error"] = str(e)
+        except Exception as e:
+            result["error"] = str(e)
+            import traceback
+            result["traceback"] = traceback.format_exc()
+        return result
+
+    def _probe_track_api_dir(self, track_index=0):
+        """List all non-private attrs of a track and a clip — find Live 12 renamed APIs."""
+        result = {"track_index": track_index}
+        try:
+            t = self._song.tracks[track_index]
+            attrs = [a for a in dir(t) if not a.startswith('_')]
+            result["track_attrs"] = attrs
+            result["track_attrs_count"] = len(attrs)
+
+            # Filter for routing-related and freeze-related
+            result["routing_related"] = [a for a in attrs if 'rout' in a.lower() or 'input' in a.lower() or 'output' in a.lower() or 'monitor' in a.lower()]
+            result["freeze_related"] = [a for a in attrs if 'freeze' in a.lower() or 'frozen' in a.lower() or 'flatten' in a.lower()]
+
+            # Probe master track + return track separately
+            result["master_attrs_count"] = len([a for a in dir(self._song.master_track) if not a.startswith('_')])
+            if len(self._song.return_tracks) > 0:
+                rt = self._song.return_tracks[0]
+                result["return_track_attrs"] = [a for a in dir(rt) if not a.startswith('_')]
+                result["return_track_freeze_related"] = [a for a in dir(rt) if not a.startswith('_') and 'freeze' in a.lower()]
+
+            # Probe audio track if any
+            audio_track_idx = None
+            for i, tt in enumerate(self._song.tracks):
+                if tt.has_audio_input:
+                    audio_track_idx = i
+                    break
+            if audio_track_idx is not None:
+                at = self._song.tracks[audio_track_idx]
+                result["audio_track_index"] = audio_track_idx
+                result["audio_track_attrs"] = [a for a in dir(at) if not a.startswith('_')]
+                result["audio_track_routing_related"] = [a for a in result["audio_track_attrs"] if 'rout' in a.lower() or 'input' in a.lower() or 'output' in a.lower()]
+                # First clip slot probe
+                if len(at.clip_slots) > 0:
+                    cs = at.clip_slots[0]
+                    result["clip_slot_attrs"] = [a for a in dir(cs) if not a.startswith('_')]
+                    if cs.has_clip:
+                        clip = cs.clip
+                        result["clip_attrs"] = [a for a in dir(clip) if not a.startswith('_')]
+
+            # available_input_routing_types — what's the type of the elements
+            try:
+                airt = list(t.available_input_routing_types)
+                if airt:
+                    result["airt_first_type"] = type(airt[0]).__name__
+                    result["airt_first_attrs"] = [a for a in dir(airt[0]) if not a.startswith('_')]
+                    result["airt_first_display_name"] = getattr(airt[0], 'display_name', None)
+            except Exception as e:
+                result["airt_error"] = str(e)
+
+            # available_input_routing_channels (if exists)
+            try:
+                airch = list(t.available_input_routing_channels) if hasattr(t, 'available_input_routing_channels') else []
+                result["airch_count"] = len(airch)
+                if airch:
+                    result["airch_first_attrs"] = [a for a in dir(airch[0]) if not a.startswith('_')]
+                    result["airch_first_display_name"] = getattr(airch[0], 'display_name', None)
+            except Exception as e:
+                result["airch_error"] = str(e)
+        except Exception as e:
+            result["error"] = str(e)
+        return result
+
+    def _probe_routing_setter(self, track_index=0):
+        """Try to set input_routing_type to Resampling on an audio track without committing."""
+        result = {"track_index": track_index}
+        try:
+            t = self._song.tracks[track_index]
+            if not t.has_audio_input:
+                result["skipped"] = "track has no audio input (probably MIDI)"
+                return result
+            # Try Live 11 API first
+            try:
+                airt = list(t.available_input_routing_types)
+                resample_rt = None
+                for rt in airt:
+                    if getattr(rt, 'display_name', '').lower() == 'resampling':
+                        resample_rt = rt
+                        break
+                result["resampling_rt_found"] = resample_rt is not None
+                if resample_rt is None:
+                    return result
+
+                # Try Live 12 setter
+                if hasattr(t, 'input_routing_type'):
+                    try:
+                        old = t.input_routing_type
+                        result["live12_old_type_display"] = getattr(old, 'display_name', None)
+                        # Try setting
+                        t.input_routing_type = resample_rt
+                        result["live12_set_ok"] = True
+                        # Read back
+                        result["live12_after_set_display"] = getattr(t.input_routing_type, 'display_name', None)
+                        # Restore
+                        t.input_routing_type = old
+                        result["live12_restored_display"] = getattr(t.input_routing_type, 'display_name', None)
+                    except Exception as e:
+                        result["live12_set_error"] = str(e)
+                else:
+                    result["live12_input_routing_type_attr"] = False
+                # Try Live 11 setter
+                if hasattr(t, 'current_input_routing_type'):
+                    result["live11_attr_exists"] = True
+                else:
+                    result["live11_attr_exists"] = False
+            except Exception as e:
+                result["airt_error"] = str(e)
+        except Exception as e:
+            result["error"] = str(e)
+        return result
+
+    def _resolve_filepath_to_browser_path(self, filepath):
+        """Map a container/host filepath to an Ableton browser path.
+
+        Only /ocp/mnt/_lib_ and /ocp/mnt/Splice (and their host equivalents)
+        are supported. Any other prefix raises ValueError with typed error.
+        """
+        if not filepath:
+            raise ValueError("empty_path: filepath must not be empty")
+
+        # Normalize trailing slash
+        fp = filepath.rstrip("/")
+        for prefix, browser_root in self._FILEPATH_BROWSER_MAPPING:
+            if fp == prefix:
+                return browser_root
+            if fp.startswith(prefix + "/"):
+                rel = fp[len(prefix) + 1:]
+                return "{0}/{1}".format(browser_root, rel)
+
+        raise ValueError(
+            "unsupported_prefix: '{0}' is not under a supported mount. "
+            "Supported: /ocp/mnt/_lib_, /ocp/mnt/Splice".format(filepath)
+        )
 
     # Arrangement helper methods
 
