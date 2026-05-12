@@ -120,6 +120,14 @@ class AbletonConnection:
             "set_device_parameter", "set_device_enabled",
             "delete_device", "navigate_preset",
             "set_track_volume", "set_track_panning",
+            "load_sample_to_simpler",
+        ]
+        # Browser-load commands legitimately take longer than other handlers;
+        # the Remote Script side already bumps its internal response_queue
+        # timeout to 90 s for these, so the client socket timeout must match
+        # or the server will give up before Ableton replies.
+        is_long_load_command = command_type in [
+            "load_sample_to_simpler",
         ]
         
         try:
@@ -135,7 +143,12 @@ class AbletonConnection:
                 time.sleep(0.1)  # 100ms delay
             
             # Set timeout based on command type
-            timeout = 15.0 if is_modifying_command else 10.0
+            if is_long_load_command:
+                timeout = 95.0
+            elif is_modifying_command:
+                timeout = 15.0
+            else:
+                timeout = 10.0
             self.sock.settimeout(timeout)
             
             # Receive the response
