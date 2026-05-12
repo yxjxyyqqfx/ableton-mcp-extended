@@ -60,15 +60,17 @@ User-confirmed scope: **B1-B9 + F6** (defer B10-B12 to a later cycle).
 
 **Phase 3 complete: 10/10 commits. T3.8 atomic-test invariant: ALL commits independently green (190 passing at HEAD).**
 
-### Deferred (post-confirmation)
+### Deferred from upstream PR queue, PORTED INTO fork as-is
 
-These bundles are **ported into our-extensions from /legacy as-is** (so the fork keeps working as expected) but are NOT cleaned up for upstream and NOT included in the Phase 5 PR queue. They will be revisited in a follow-up cycle after PR-A...PR-D land.
+These bundles are **ported into our-extensions from /legacy as-is** (commit `539ce69` on 2026-05-12) so the fork keeps working as expected. They are still NOT cleaned up for upstream and NOT included in the Phase 5 PR queue. The upstream-ready rework will be revisited in a follow-up cycle after PR-A...PR-E land.
 
-- ~~B10 — Rework: name-based sample lookup~~ DEFERRED
-- ~~B11 — Rework: filepath → browser path mapping~~ DEFERRED
-- ~~B12 — Rework: user_folders cleanup~~ DEFERRED
+- [x] B10 — name-based sample lookup (`_find_browser_item_by_name_under_path` + `_load_browser_sample_by_name` + server wrapper) — fork-only, hardcoded valid_roots `User_folders/_lib_` and `User_folders/Splice`.
+- [x] B11 — filepath → browser path mapping (`_FILEPATH_BROWSER_MAPPING` class attr + `_resolve_filepath_to_browser_path` + server wrapper) — fork-only, hardcoded `/ocp/mnt/*` and `/Users/user/*` prefixes.
+- [x] B12 — user_folders traversal cleanup in `get_browser_items_at_path` — safer range-indexed iteration to avoid closing the Live TCP connection.
 
-Rationale for deferral (user-approved):
+Test delta: 189 → 199 passing (+10 in `tests/unit/test_fork_only_browser_by_name.py`).
+
+Rationale for deferring the upstream-ready rework (user-approved):
 - 3/5 Upstream Fit means meaningful pushback risk during review.
 - Each requires API design discussion with maintainer that could block the rest of the PR queue.
 - The fork itself doesn't need the rework — only the upstream-PR-ready version does.
