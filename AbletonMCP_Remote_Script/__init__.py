@@ -554,6 +554,112 @@ class AbletonMCP(ControlSurface):
             self._load_locks[key] = threading.Lock()
         return self._load_locks[key]
 
+    # ----- Safer browser-tree accessors -----
+
+    def _browser_children(self, browser_or_item):
+        """Return browser children using safer, bounded access patterns.
+
+        Live's browser tree mixes string-like leaves, list/tuple containers and
+        BrowserItem-like nodes that may expose either a `.children` attribute or
+        a numeric index. This helper normalizes those shapes and never raises.
+        """
+        try:
+            if browser_or_item is None:
+                return []
+            _basestring = globals().get("__builtins__", {}).get("basestring") if isinstance(globals().get("__builtins__"), dict) else getattr(__builtins__, "basestring", None)
+            string_types = (_basestring,) if _basestring else (str, bytes)
+            if isinstance(browser_or_item, string_types):
+                return []
+            if isinstance(browser_or_item, (list, tuple)):
+                return browser_or_item
+
+            if hasattr(browser_or_item, 'children'):
+                try:
+                    children = browser_or_item.children
+                except Exception:
+                    children = None
+                if children is not None:
+                    if isinstance(children, string_types):
+                        return []
+                    if isinstance(children, (list, tuple)):
+                        return children
+                    return self._browser_children(children)
+
+            max_items = 512
+            children = []
+            indexed = False
+            try:
+                for idx in range(max_items):
+                    try:
+                        child = browser_or_item[idx]
+                        children.append(child)
+                        indexed = True
+                    except Exception:
+                        if idx == 0:
+                            raise
+                        break
+                return children
+            except Exception:
+                if not indexed:
+                    try:
+                        for child in browser_or_item:
+                            children.append(child)
+                            if len(children) >= max_items:
+                                break
+                        return children
+                    except Exception:
+                        return []
+                return children
+        except Exception:
+            return []
+
+    def _search_browser_by_name(self, browser, filename, max_depth=12):
+        """Search all browser categories for a file by name (case-insensitive)."""
+        filename_lower = filename.lower()
+
+        def search_node(node, depth):
+            if depth <= 0:
+                return None
+            try:
+                name = node.name if hasattr(node, 'name') else ""
+                if name.lower() == filename_lower and hasattr(node, 'is_loadable') and node.is_loadable:
+                    return node
+                children = node.children if hasattr(node, 'children') else None
+                if not children:
+                    return None
+                for child in children:
+                    result = search_node(child, depth - 1)
+                    if result is not None:
+                        return result
+            except Exception:
+                pass
+            return None
+
+        search_roots = [
+            'user_folders', 'samples', 'user_library', 'sounds',
+            'drums', 'instruments', 'packs', 'current_project',
+        ]
+        for root_name in search_roots:
+            if not hasattr(browser, root_name):
+                continue
+            try:
+                root = getattr(browser, root_name)
+                if root is None:
+                    continue
+                try:
+                    children = root.children if hasattr(root, 'children') else root
+                    for child in (children or []):
+                        result = search_node(child, max_depth)
+                        if result is not None:
+                            return result
+                except Exception:
+                    result = search_node(root, max_depth)
+                    if result is not None:
+                        return result
+            except Exception as e:
+                self.log_message("search_browser_by_name error in {0}: {1}".format(root_name, str(e)))
+        return None
+
     # Arrangement helper methods
 
     def _get_arrangement_clip_info(self, clip):
