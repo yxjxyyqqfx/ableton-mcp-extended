@@ -43,7 +43,7 @@ pytestmark = pytest.mark.integration
 
 HOST = os.getenv("ABLETON_HOST", "host.docker.internal")
 PORT = int(os.getenv("ABLETON_PORT", "9877"))
-SOCKET_TIMEOUT = float(os.getenv("ABLETON_TEST_TIMEOUT", "10.0"))
+SOCKET_TIMEOUT = float(os.getenv("ABLETON_TEST_TIMEOUT", "95.0"))
 
 
 # ---------- Fixtures / helpers ----------

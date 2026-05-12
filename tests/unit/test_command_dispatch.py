@@ -75,3 +75,30 @@ def test_valid_commands_rejects_unknown_command_names():
     pkg = _import_remote_script_module()
     for bogus in ("delete_universe", "fly_to_moon", ""):
         assert bogus not in pkg.VALID_COMMANDS
+
+
+def test_every_dispatched_command_is_in_allowlist():
+    """Regression guard: every `command_type == "X"` branch in _process_command
+    must have a matching entry in VALID_COMMANDS, otherwise the allowlist
+    short-circuits dispatch and the command appears as 'Unknown command'.
+
+    This catches the bug fixed in commit (see git log) where 13 upstream
+    handlers (get_arrangement_info, get_browser_*, get_chain_info,
+    get_cue_points, get_device_parameters, get_drum_pad_info,
+    get_track_volume, load_instrument_or_effect, load_browser_item) were
+    dispatched but missing from VALID_COMMANDS — so calling any of them
+    via the JSON socket returned 'Unknown command'.
+    """
+    import pathlib
+    import re
+
+    pkg = _import_remote_script_module()
+    source = pathlib.Path(pkg.__file__).read_text(encoding="utf-8")
+    pattern = re.compile(r'(?:if|elif)\s+command_type\s*==\s*"([a-z_][a-z0-9_]*)"')
+    dispatched = set(pattern.findall(source))
+    assert dispatched, "Failed to extract dispatch branches from source"
+    missing = sorted(dispatched - set(pkg.VALID_COMMANDS))
+    assert not missing, (
+        "dispatched commands missing from VALID_COMMANDS allowlist: {0!r}. "
+        "Either add them to VALID_COMMANDS or remove the dispatch case.".format(missing)
+    )
