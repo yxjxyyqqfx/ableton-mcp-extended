@@ -5,9 +5,7 @@ view selection, schedule_message tick loop). These tests cover the pure
 helpers and the lock-contention BUSY response path.
 """
 
-import queue
 import sys
-import threading
 import types
 
 import pytest
@@ -156,26 +154,3 @@ def test_find_actual_pad_note_matches_requested(script):
     assert actual == 36
     assert reason is None
 
-
-def test_load_browser_item_with_retry_busy_path_when_lock_held(script):
-    """If another worker holds the lock, we push BUSY without invoking schedule_message."""
-    lock = script._get_load_lock(1, 0)
-    lock.acquire()
-    try:
-        response_queue = queue.Queue()
-        spec = {"kind": "drum_pad", "track_index": 1, "rack_device_index": 0, "pad_note": 36, "replace": False}
-        item = type("Item", (), {"name": "Kick.wav", "uri": "u"})()
-
-        worker = threading.Thread(
-            target=script._load_browser_item_with_retry,
-            args=(spec, item, response_queue, 5),
-        )
-        worker.start()
-        result = response_queue.get(timeout=15)
-        worker.join(timeout=2)
-
-        assert result["loaded"] is False
-        assert result["item_name"] == "Kick.wav"
-        assert any("BUSY" in err for err in result["errors"])
-    finally:
-        lock.release()

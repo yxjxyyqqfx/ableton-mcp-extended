@@ -621,11 +621,15 @@ class AbletonMCP(ControlSurface):
             return []
 
     def _get_load_lock(self, track_index, rack_device_index):
-        """Return (creating if needed) the per-(track, rack) threading.Lock."""
-        key = (track_index, rack_device_index)
-        if key not in self._load_locks:
-            self._load_locks[key] = threading.Lock()
-        return self._load_locks[key]
+        """Return (creating if needed) the per-(track, rack) threading.Lock.
+
+        Uses dict.setdefault() so concurrent callers with the same key receive
+        the same Lock instance (the throwaway Lock created by the loser is
+        immediately garbage-collected).
+        """
+        return self._load_locks.setdefault(
+            (track_index, rack_device_index), threading.Lock()
+        )
 
     # ----- Safer browser-tree accessors -----
 
@@ -787,152 +791,6 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error in _find_actual_pad_note: {0}".format(str(e)))
             return (requested_pad_note, None)
 
-    def _load_browser_item_with_retry(self, spec, item, response_queue, max_ticks=20):
-        """State-machine loader: worker thread -> main thread via schedule_message.
-
-        spec = {"kind": "drum_pad", "track_index", "rack_device_index", "pad_note", "replace"}
-        item: Live BrowserItem (must be loadable)
-        response_queue: threading.Queue to push final result dict
-        max_ticks: max schedule_message(1,...) retries before timeout
-        """
-        track_index = spec.get("track_index", 0)
-        rack_device_index = spec.get("rack_device_index", 0)
-        pad_note = spec.get("pad_note", 36)
-        replace = spec.get("replace", False)
-        item_name = item.name if hasattr(item, 'name') else "unknown"
-        item_uri = item.uri if hasattr(item, 'uri') else "unknown"
-
-        lock = self._get_load_lock(track_index, rack_device_index)
-        acquired = lock.acquire(timeout=10)
-        if not acquired:
-            response_queue.put({
-                "loaded": False, "mode": "drum_pad", "item_name": item_name,
-                "item_uri": item_uri, "requested_pad_note": pad_note,
-                "actual_pad_note": None, "devices_signature_pre": None,
-                "devices_signature_post": None, "devices_changed": None,
-                "ticks_waited": 0,
-                "errors": ["BUSY: lock not acquired within 10s"],
-            })
-            return
-
-        def _start_load():
-            try:
-                if track_index < 0 or track_index >= len(self._song.tracks):
-                    raise IndexError("Track index out of range")
-                track = self._song.tracks[track_index]
-                if rack_device_index < 0 or rack_device_index >= len(track.devices):
-                    raise IndexError("Rack device index out of range")
-                rack = track.devices[rack_device_index]
-                if not rack.can_have_drum_pads:
-                    raise ValueError("Device is not a Drum Rack")
-
-                target_pad = None
-                for pad in rack.drum_pads:
-                    if pad.note == pad_note:
-                        target_pad = pad
-                        break
-                if target_pad is None:
-                    raise ValueError("No pad with note {0}".format(pad_note))
-                if target_pad.chains and not replace:
-                    raise ValueError("Pad {0} already has chains; use replace=True".format(pad_note))
-
-                pre_pad_count = len(target_pad.chains)
-                pre_sig = self._devices_signature(track)
-
-                self._song.view.selected_track = track
-                try:
-                    self._song.view.select_device(rack)
-                except Exception:
-                    pass
-                try:
-                    rack.view.selected_drum_pad = target_pad
-                except Exception:
-                    pass
-                if replace and target_pad.chains:
-                    target_pad.delete_all_chains()
-                    pre_pad_count = 0
-
-                app = self.application()
-                app.browser.load_item(item)
-
-                def _check(tick):
-                    try:
-                        reason, done = self._load_complete_predicate(
-                            track, target_pad, pre_pad_count, pre_sig)
-                        if done:
-                            post_sig = self._devices_signature(track)
-                            actual_note = pad_note
-                            for p in rack.drum_pads:
-                                if len(p.chains) > (0 if replace else pre_pad_count):
-                                    actual_note = p.note
-                                    break
-                            lock.release()
-                            response_queue.put({
-                                "loaded": True, "mode": "drum_pad",
-                                "item_name": item_name, "item_uri": item_uri,
-                                "requested_pad_note": pad_note,
-                                "actual_pad_note": actual_note,
-                                "devices_signature_pre": list(pre_sig),
-                                "devices_signature_post": list(post_sig),
-                                "devices_changed": pre_sig != post_sig,
-                                "ticks_waited": tick, "errors": [],
-                            })
-                        elif reason == "topology_changed":
-                            lock.release()
-                            response_queue.put({
-                                "loaded": False, "mode": "drum_pad",
-                                "item_name": item_name, "item_uri": item_uri,
-                                "requested_pad_note": pad_note,
-                                "actual_pad_note": None,
-                                "devices_signature_pre": list(pre_sig),
-                                "devices_signature_post": list(self._devices_signature(track)),
-                                "devices_changed": True, "ticks_waited": tick,
-                                "errors": ["topology_changed: Drum Rack replaced"],
-                            })
-                        elif tick >= max_ticks:
-                            lock.release()
-                            response_queue.put({
-                                "loaded": False, "mode": "drum_pad",
-                                "item_name": item_name, "item_uri": item_uri,
-                                "requested_pad_note": pad_note,
-                                "actual_pad_note": None,
-                                "devices_signature_pre": list(pre_sig),
-                                "devices_signature_post": list(self._devices_signature(track)),
-                                "devices_changed": None, "ticks_waited": tick,
-                                "errors": ["timeout after {0} ticks".format(max_ticks)],
-                            })
-                        else:
-                            self.schedule_message(1, lambda: _check(tick + 1))
-                    except Exception as e:
-                        lock.release()
-                        response_queue.put({
-                            "loaded": False, "mode": "drum_pad",
-                            "item_name": item_name, "item_uri": item_uri,
-                            "requested_pad_note": pad_note,
-                            "actual_pad_note": None,
-                            "devices_signature_pre": None,
-                            "devices_signature_post": None,
-                            "devices_changed": None, "ticks_waited": tick,
-                            "errors": [str(e)],
-                        })
-
-                self.schedule_message(1, lambda: _check(0))
-
-            except Exception as e:
-                lock.release()
-                response_queue.put({
-                    "loaded": False, "mode": "drum_pad",
-                    "item_name": item_name, "item_uri": item_uri,
-                    "requested_pad_note": pad_note,
-                    "actual_pad_note": None,
-                    "devices_signature_pre": None,
-                    "devices_signature_post": None,
-                    "devices_changed": None, "ticks_waited": 0,
-                    "errors": [str(e)],
-                })
-
-        self.schedule_message(0, _start_load)
-
     # ----- Sample loading handlers (B7) -----
 
     def _load_sample_to_simpler(self, track_index, item_uri, device_index=None):
@@ -1026,7 +884,7 @@ class AbletonMCP(ControlSurface):
                     break
             if target_pad is None:
                 raise ValueError("No Drum Rack pad with MIDI note {0}".format(pad_note))
-            if target_pad.chains and not replace:
+            if target_pad.chains and replace is not True:
                 raise ValueError("Pad note {0} already has chains; pass replace=True to replace".format(pad_note))
 
             pre_pad_count = len(target_pad.chains)
@@ -1041,7 +899,7 @@ class AbletonMCP(ControlSurface):
                 rack.view.selected_drum_pad = target_pad
             except Exception as e:
                 self.log_message("Could not select pad: {0}".format(str(e)))
-            if replace and target_pad.chains:
+            if replace is True and target_pad.chains:
                 target_pad.delete_all_chains()
                 pre_pad_count = 0
 
@@ -1251,7 +1109,15 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _wait_for_load_complete(self, track_index, rack_device_index, pad_note, max_ticks=20):
-        """Poll a Drum Rack pad for a loaded chain after browser.load_item."""
+        """Poll a Drum Rack pad for a loaded chain after browser.load_item.
+
+        WARNING: this runs on Live's main thread (the command dispatcher
+        schedules handlers through schedule_message). The poll loop briefly
+        blocks the UI for up to max_ticks * 0.02s. Keep max_ticks small
+        (default 20 -> ~400 ms worst case). If the load truly needs longer,
+        prefer issuing a fresh verify_drum_pad_loaded later instead of a long
+        wait here.
+        """
         try:
             try:
                 max_ticks = int(max_ticks)
@@ -1265,7 +1131,7 @@ class AbletonMCP(ControlSurface):
                 last["ticks_waited"] = tick
                 if last.get("loaded"):
                     return last
-                time.sleep(0.05)
+                time.sleep(0.02)
             return last
         except Exception as e:
             self.log_message("Error waiting for Drum Rack pad load: {0}".format(str(e)))
