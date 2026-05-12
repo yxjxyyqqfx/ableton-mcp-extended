@@ -47,9 +47,9 @@
 
 User-confirmed scope: **B1-B9 + F6** (defer B10-B12 to a later cycle).
 
-1. [ ] B1 — `eof_newline_server_py`
-2. [ ] B2 — `ableton_host_port_env_vars`
-3. [ ] B3 — `valid_commands_registry`
+1. [x] B1 — `eof_newline_server_py` — **NO-OP** (already in upstream/main, verified `tail -c 1` is `\n`)
+2. [x] B2 — `ableton_host_port_env_vars` — commit `11554c4` (3 tests added, 146 total passing)
+3. [x] B3 — `valid_commands_registry` — commit `1cd14e0` (refactor + 4 tests, 150 total passing)
 4. [ ] B4 — F4 concurrency primitives
 5. [ ] B5 — `_browser_children` + `_search_browser_by_name`
 6. [ ] B6 — `_load_browser_item_with_retry`
