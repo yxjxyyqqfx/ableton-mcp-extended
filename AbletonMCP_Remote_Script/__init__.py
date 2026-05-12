@@ -660,6 +660,206 @@ class AbletonMCP(ControlSurface):
                 self.log_message("search_browser_by_name error in {0}: {1}".format(root_name, str(e)))
         return None
 
+    # ----- Drum Rack load diagnostics + browser-load state machine -----
+
+    def _devices_signature(self, track):
+        """Return a tuple identifying current device topology on a track."""
+        try:
+            return tuple((d.class_name, id(d)) for d in track.devices)
+        except Exception:
+            return ()
+
+    def _load_complete_predicate(self, track, target_pad, pre_pad_count,
+                                 pre_devices_signature,
+                                 expected_classes=None):
+        """Check if a browser.load_item() has completed on a Drum Rack pad.
+
+        Returns (reason, is_complete). Must run on the Live main thread.
+        """
+        if expected_classes is None:
+            expected_classes = {"OriginalSimpler", "MultiSampler"}
+        try:
+            current_sig = self._devices_signature(track)
+            if current_sig != pre_devices_signature:
+                return ("topology_changed", False)
+            if len(target_pad.chains) <= pre_pad_count:
+                return (None, False)
+            last_chain = target_pad.chains[-1]
+            if not last_chain.devices:
+                return (None, False)
+            device_class = last_chain.devices[0].class_name
+            if device_class not in expected_classes:
+                return ("wrong_device_class:{0}".format(device_class), False)
+            return (None, True)
+        except Exception as e:
+            return ("predicate_error:{0}".format(str(e)), False)
+
+    def _find_actual_pad_note(self, rack, pre_pad_count, requested_pad_note):
+        """Scan drum pads to find which one gained a new chain after load.
+
+        Returns (actual_pad_note, mismatch_reason). Diagnostic-only.
+        """
+        try:
+            for pad in rack.drum_pads:
+                if len(pad.chains) > pre_pad_count:
+                    actual = pad.note
+                    reason = None if actual == requested_pad_note else "off_by_one"
+                    if reason:
+                        self.log_message(
+                            "WARN off_by_one: requested={0} actual={1}".format(
+                                requested_pad_note, actual))
+                    return (actual, reason)
+            return (requested_pad_note, None)
+        except Exception as e:
+            self.log_message("Error in _find_actual_pad_note: {0}".format(str(e)))
+            return (requested_pad_note, None)
+
+    def _load_browser_item_with_retry(self, spec, item, response_queue, max_ticks=20):
+        """State-machine loader: worker thread -> main thread via schedule_message.
+
+        spec = {"kind": "drum_pad", "track_index", "rack_device_index", "pad_note", "replace"}
+        item: Live BrowserItem (must be loadable)
+        response_queue: threading.Queue to push final result dict
+        max_ticks: max schedule_message(1,...) retries before timeout
+        """
+        track_index = spec.get("track_index", 0)
+        rack_device_index = spec.get("rack_device_index", 0)
+        pad_note = spec.get("pad_note", 36)
+        replace = spec.get("replace", False)
+        item_name = item.name if hasattr(item, 'name') else "unknown"
+        item_uri = item.uri if hasattr(item, 'uri') else "unknown"
+
+        lock = self._get_load_lock(track_index, rack_device_index)
+        acquired = lock.acquire(timeout=10)
+        if not acquired:
+            response_queue.put({
+                "loaded": False, "mode": "drum_pad", "item_name": item_name,
+                "item_uri": item_uri, "requested_pad_note": pad_note,
+                "actual_pad_note": None, "devices_signature_pre": None,
+                "devices_signature_post": None, "devices_changed": None,
+                "ticks_waited": 0,
+                "errors": ["BUSY: lock not acquired within 10s"],
+            })
+            return
+
+        def _start_load():
+            try:
+                if track_index < 0 or track_index >= len(self._song.tracks):
+                    raise IndexError("Track index out of range")
+                track = self._song.tracks[track_index]
+                if rack_device_index < 0 or rack_device_index >= len(track.devices):
+                    raise IndexError("Rack device index out of range")
+                rack = track.devices[rack_device_index]
+                if not rack.can_have_drum_pads:
+                    raise ValueError("Device is not a Drum Rack")
+
+                target_pad = None
+                for pad in rack.drum_pads:
+                    if pad.note == pad_note:
+                        target_pad = pad
+                        break
+                if target_pad is None:
+                    raise ValueError("No pad with note {0}".format(pad_note))
+                if target_pad.chains and not replace:
+                    raise ValueError("Pad {0} already has chains; use replace=True".format(pad_note))
+
+                pre_pad_count = len(target_pad.chains)
+                pre_sig = self._devices_signature(track)
+
+                self._song.view.selected_track = track
+                try:
+                    self._song.view.select_device(rack)
+                except Exception:
+                    pass
+                try:
+                    rack.view.selected_drum_pad = target_pad
+                except Exception:
+                    pass
+                if replace and target_pad.chains:
+                    target_pad.delete_all_chains()
+                    pre_pad_count = 0
+
+                app = self.application()
+                app.browser.load_item(item)
+
+                def _check(tick):
+                    try:
+                        reason, done = self._load_complete_predicate(
+                            track, target_pad, pre_pad_count, pre_sig)
+                        if done:
+                            post_sig = self._devices_signature(track)
+                            actual_note = pad_note
+                            for p in rack.drum_pads:
+                                if len(p.chains) > (0 if replace else pre_pad_count):
+                                    actual_note = p.note
+                                    break
+                            lock.release()
+                            response_queue.put({
+                                "loaded": True, "mode": "drum_pad",
+                                "item_name": item_name, "item_uri": item_uri,
+                                "requested_pad_note": pad_note,
+                                "actual_pad_note": actual_note,
+                                "devices_signature_pre": list(pre_sig),
+                                "devices_signature_post": list(post_sig),
+                                "devices_changed": pre_sig != post_sig,
+                                "ticks_waited": tick, "errors": [],
+                            })
+                        elif reason == "topology_changed":
+                            lock.release()
+                            response_queue.put({
+                                "loaded": False, "mode": "drum_pad",
+                                "item_name": item_name, "item_uri": item_uri,
+                                "requested_pad_note": pad_note,
+                                "actual_pad_note": None,
+                                "devices_signature_pre": list(pre_sig),
+                                "devices_signature_post": list(self._devices_signature(track)),
+                                "devices_changed": True, "ticks_waited": tick,
+                                "errors": ["topology_changed: Drum Rack replaced"],
+                            })
+                        elif tick >= max_ticks:
+                            lock.release()
+                            response_queue.put({
+                                "loaded": False, "mode": "drum_pad",
+                                "item_name": item_name, "item_uri": item_uri,
+                                "requested_pad_note": pad_note,
+                                "actual_pad_note": None,
+                                "devices_signature_pre": list(pre_sig),
+                                "devices_signature_post": list(self._devices_signature(track)),
+                                "devices_changed": None, "ticks_waited": tick,
+                                "errors": ["timeout after {0} ticks".format(max_ticks)],
+                            })
+                        else:
+                            self.schedule_message(1, lambda: _check(tick + 1))
+                    except Exception as e:
+                        lock.release()
+                        response_queue.put({
+                            "loaded": False, "mode": "drum_pad",
+                            "item_name": item_name, "item_uri": item_uri,
+                            "requested_pad_note": pad_note,
+                            "actual_pad_note": None,
+                            "devices_signature_pre": None,
+                            "devices_signature_post": None,
+                            "devices_changed": None, "ticks_waited": tick,
+                            "errors": [str(e)],
+                        })
+
+                self.schedule_message(1, lambda: _check(0))
+
+            except Exception as e:
+                lock.release()
+                response_queue.put({
+                    "loaded": False, "mode": "drum_pad",
+                    "item_name": item_name, "item_uri": item_uri,
+                    "requested_pad_note": pad_note,
+                    "actual_pad_note": None,
+                    "devices_signature_pre": None,
+                    "devices_signature_post": None,
+                    "devices_changed": None, "ticks_waited": 0,
+                    "errors": [str(e)],
+                })
+
+        self.schedule_message(0, _start_load)
+
     # Arrangement helper methods
 
     def _get_arrangement_clip_info(self, clip):
