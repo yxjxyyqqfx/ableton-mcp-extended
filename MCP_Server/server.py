@@ -711,6 +711,129 @@ def load_sample_to_simpler(ctx: Context, track_index: int, uri: str, device_inde
 
 
 @mcp.tool()
+def load_sample_to_drum_pad(
+    ctx: Context,
+    track_index: int,
+    uri: str,
+    pad_note: int = 36,
+    rack_device_index: int = 1,
+    replace: bool = False,
+) -> str:
+    """
+    Load a browser sample item onto a Drum Rack pad, creating a Simpler chain.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - uri: Browser item URI for the sample (e.g. query:Samples#FileId_...).
+    - pad_note: MIDI note number for the Drum Rack pad (default 36 = C1 kick pad).
+    - rack_device_index: Drum Rack device number on the track (1-based).
+    - replace: Delete existing chains on the pad before loading.
+    """
+    try:
+        ableton = get_ableton_connection()
+        ti = _to_zero_based(track_index, "track_index")
+        rack_di = _to_zero_based(rack_device_index, "rack_device_index")
+        result = ableton.send_command("load_sample_to_drum_pad", {
+            "track_index": ti,
+            "item_uri": uri,
+            "pad_note": pad_note,
+            "rack_device_index": rack_di,
+            "replace": replace,
+        })
+        return "Loaded sample '{0}' to Drum Rack pad note {1} on track {2}".format(
+            result.get("item_name", uri), pad_note, track_index
+        )
+    except Exception as e:
+        logger.error(f"Error loading sample to Drum Rack pad: {str(e)}")
+        return f"Error loading sample to Drum Rack pad: {str(e)}"
+
+
+@mcp.tool()
+def ensure_drum_rack_on_track(
+    ctx: Context,
+    track_index: int = 0,
+    name: str = "",
+    create_if_missing: bool = True,
+) -> str:
+    """Idempotently ensure a Drum Rack exists on a track.
+
+    track_index=0 means create a new MIDI track. If the track already has a
+    Drum Rack, its index is returned and no new device is loaded.
+    """
+    try:
+        ableton = get_ableton_connection()
+        ti = _to_zero_based(track_index, "track_index") if track_index > 0 else -1
+        result = ableton.send_command("ensure_drum_rack_on_track", {
+            "track_index": ti,
+            "name": name,
+            "create_if_missing": create_if_missing,
+        })
+        return f"Drum Rack ensured: {result}"
+    except Exception as e:
+        logger.error(f"Error ensuring Drum Rack: {str(e)}")
+        return f"Error ensuring Drum Rack: {str(e)}"
+
+
+@mcp.tool()
+def verify_drum_pad_loaded(
+    ctx: Context,
+    track_index: int,
+    rack_device_index: int,
+    pad_note: int,
+    expected_filename: str = "",
+) -> str:
+    """Verify a Drum Rack pad has the expected sample loaded.
+
+    Returns a structured mismatch_reason in
+    {None, no_chain, wrong_filename, off_by_one} so callers can act on the
+    failure mode programmatically.
+    """
+    try:
+        ableton = get_ableton_connection()
+        ti = _to_zero_based(track_index, "track_index")
+        rdi = _to_zero_based(rack_device_index, "rack_device_index")
+        result = ableton.send_command("verify_drum_pad_loaded", {
+            "track_index": ti,
+            "rack_device_index": rdi,
+            "pad_note": pad_note,
+            "expected_filename": expected_filename,
+        })
+        return f"Pad verification: {result}"
+    except Exception as e:
+        logger.error(f"Error verifying pad: {str(e)}")
+        return f"Error verifying pad: {str(e)}"
+
+
+@mcp.tool()
+def wait_for_load_complete(
+    ctx: Context,
+    track_index: int,
+    rack_device_index: int,
+    pad_note: int,
+    max_ticks: int = 20,
+) -> str:
+    """Poll a Drum Rack pad until a sampler chain is loaded.
+
+    Useful right after browser.load_item to confirm the async Live load
+    completed before issuing follow-up commands on the same pad.
+    """
+    try:
+        ableton = get_ableton_connection()
+        ti = _to_zero_based(track_index, "track_index")
+        rdi = _to_zero_based(rack_device_index, "rack_device_index")
+        result = ableton.send_command("wait_for_load_complete", {
+            "track_index": ti,
+            "rack_device_index": rdi,
+            "pad_note": pad_note,
+            "max_ticks": max_ticks,
+        })
+        return f"Pad load wait result: {result}"
+    except Exception as e:
+        logger.error(f"Error waiting for pad load: {str(e)}")
+        return f"Error waiting for pad load: {str(e)}"
+
+
+@mcp.tool()
 def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """
     Start playing a clip.
