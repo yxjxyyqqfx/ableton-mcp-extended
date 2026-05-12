@@ -797,14 +797,20 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             return ("predicate_error:{0}".format(str(e)), False)
 
-    def _find_actual_pad_note(self, rack, pre_pad_count, requested_pad_note):
+    def _find_actual_pad_note(self, rack, pre_pad_counts, requested_pad_note):
         """Scan drum pads to find which one gained a new chain after load.
+
+        pre_pad_counts: dict {pad_note: pre_load_chain_count} — snapshot of
+        chain counts BEFORE the load on EVERY pad (not just the requested
+        one). This is necessary so that pre-existing chains on other pads
+        don't get reported as the actual landing pad on subsequent loads.
 
         Returns (actual_pad_note, mismatch_reason). Diagnostic-only.
         """
         try:
             for pad in rack.drum_pads:
-                if len(pad.chains) > pre_pad_count:
+                pre = pre_pad_counts.get(pad.note, 0) if isinstance(pre_pad_counts, dict) else pre_pad_counts
+                if len(pad.chains) > pre:
                     actual = pad.note
                     reason = None if actual == requested_pad_note else "off_by_one"
                     if reason:
@@ -914,6 +920,10 @@ class AbletonMCP(ControlSurface):
                 raise ValueError("Pad note {0} already has chains; pass replace=True to replace".format(pad_note))
 
             pre_pad_count = len(target_pad.chains)
+            # Snapshot chain counts on ALL pads so _find_actual_pad_note can
+            # distinguish a freshly-loaded pad from pre-existing pads with
+            # chains from earlier loads on the same rack.
+            pre_pad_counts = {p.note: len(p.chains) for p in rack.drum_pads}
             pre_sig = self._devices_signature(track)
 
             self._song.view.selected_track = track
@@ -933,7 +943,7 @@ class AbletonMCP(ControlSurface):
             self.application().browser.load_item(item)
             self._record_lock_event(key, "load_item_end", worker_id, pad_note=pad_note)
 
-            actual_pad_note, mismatch_reason = self._find_actual_pad_note(rack, pre_pad_count, pad_note)
+            actual_pad_note, mismatch_reason = self._find_actual_pad_note(rack, pre_pad_counts, pad_note)
             post_sig = self._devices_signature(track)
 
             return {

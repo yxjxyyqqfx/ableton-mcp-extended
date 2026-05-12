@@ -139,7 +139,8 @@ def test_find_actual_pad_note_off_by_one(script):
     class _Rack:
         drum_pads = [_FakePad(36), _FakePad(37, chains=[_FakeChain([])])]
 
-    actual, reason = script._find_actual_pad_note(_Rack(), pre_pad_count=0, requested_pad_note=36)
+    actual, reason = script._find_actual_pad_note(
+        _Rack(), pre_pad_counts={36: 0, 37: 0}, requested_pad_note=36)
     assert actual == 37
     assert reason == "off_by_one"
 
@@ -150,7 +151,46 @@ def test_find_actual_pad_note_matches_requested(script):
     class _Rack:
         drum_pads = [_FakePad(36, chains=[_FakeChain([])]), _FakePad(37)]
 
-    actual, reason = script._find_actual_pad_note(_Rack(), pre_pad_count=0, requested_pad_note=36)
+    actual, reason = script._find_actual_pad_note(
+        _Rack(), pre_pad_counts={36: 0, 37: 0}, requested_pad_note=36)
     assert actual == 36
     assert reason is None
+
+
+def test_find_actual_pad_note_ignores_pre_existing_chains_on_other_pads(script):
+    """Regression: chains that were on other pads BEFORE the load must not
+    be reported as the actual landing pad. Real-world repro: loading a Kick
+    onto pad 36 first, then loading a Snare onto pad 38 — the scan must
+    return pad 38, not pad 36 (which already had a chain from the kick).
+    """
+
+    class _Rack:
+        # pad 36 has a chain already (from a previous load), pad 38 also has
+        # a chain (just-loaded snare). The function must return 38.
+        drum_pads = [
+            _FakePad(36, chains=[_FakeChain([])]),
+            _FakePad(38, chains=[_FakeChain([])]),
+        ]
+
+    actual, reason = script._find_actual_pad_note(
+        _Rack(),
+        pre_pad_counts={36: 1, 38: 0},  # pad 36 already had 1 chain; pad 38 had 0
+        requested_pad_note=38,
+    )
+    assert actual == 38
+    assert reason is None
+
+
+def test_find_actual_pad_note_accepts_legacy_int_pre_pad_count(script):
+    """Backwards-compat: when caller passes an int (legacy callsites in
+    upstream / old fork branches), treat it as the count for every pad.
+    """
+
+    class _Rack:
+        drum_pads = [_FakePad(36), _FakePad(37, chains=[_FakeChain([])])]
+
+    actual, reason = script._find_actual_pad_note(
+        _Rack(), pre_pad_counts=0, requested_pad_note=36)
+    assert actual == 37
+    assert reason == "off_by_one"
 
