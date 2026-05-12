@@ -24,11 +24,18 @@ Tracks the lifecycle of the five upstream PRs derived from the `our-extensions` 
 
 | PR  | Feature                              | Origin branch                        | Compare URL                                                                                                                                                | Submitted (UTC) | URL       | Last signal | State                                                |
 | --- | ------------------------------------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- | --------- | ----------- | ---------------------------------------------------- |
-| A   | `feat(config)`: env-driven host/port | `pr/config-env-vars`                 | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/config-env-vars)                                 | (pending)       | (pending) | —           | branch pushed, body drafted, awaiting user submit    |
+| A   | `feat(config)`: env-driven host/port | `pr/config-env-vars`                 | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/config-env-vars)                                 | 2026-05-12 19:26 | [#24](https://github.com/uisato/ableton-mcp-extended/pull/24) | —           | **OPEN, MERGEABLE** — T5.1 submitted by user via web UI, awaiting maintainer signal |
 | B   | dispatch + concurrency + diagnostics | `pr/dispatch-and-load-foundation`    | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/dispatch-and-load-foundation)                   | (pending)       | (pending) | —           | branch pushed, body drafted, blocked by T5.1 pacing  |
 | C   | `load_sample_to_simpler`             | `pr/load-sample-to-simpler`          | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/load-sample-to-simpler)                         | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-B         |
 | D   | Drum Rack pad family                 | `pr/drum-rack-family`                | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/drum-rack-family)                               | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-C         |
 | E   | expanded URI search roots            | `pr/find-browser-item-uri-expansion` | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/find-browser-item-uri-expansion)                | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-B         |
+
+## T5.2 pacing timer
+
+- **T5.1 submitted**: 2026-05-12 19:26 UTC
+- **T5.2 earliest allowed**: 2026-05-14 19:26 UTC (≥48 h cooldown after T5.1)
+- **OR**: any signal from `uisato` (comment / review / merge / close on PR #24), whichever sooner
+- **Action when ready**: agent runs the same prep workflow for PR-B (body already drafted at `.sisyphus/pr-bodies/dispatch-and-load-foundation.md`, branch already pushed)
 
 ## How to submit (per PR)
 
