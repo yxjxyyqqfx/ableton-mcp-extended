@@ -1508,42 +1508,56 @@ class AbletonMCP(ControlSurface):
             raise
     
     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
-        """Find a browser item by its URI"""
+        """Find a browser item by its URI across all load-relevant roots.
+
+        Walks recursively. Accepts a browser, a BrowserItem, or a list/tuple of
+        either. Uses _browser_children for safe child enumeration so non-list
+        iterables don't crash the traversal. Searches the full set of roots
+        relevant to sample / instrument loading, not just instruments+sounds+
+        drums+audio_effects+midi_effects+plugins.
+        """
         try:
-            # Check if this is the item we're looking for
+            if isinstance(browser_or_item, (list, tuple)):
+                for child in browser_or_item:
+                    item = self._find_browser_item_by_uri(child, uri, max_depth, current_depth + 1)
+                    if item:
+                        return item
+                return None
+
             if hasattr(browser_or_item, 'uri') and browser_or_item.uri == uri:
                 return browser_or_item
-            
-            # Stop recursion if we've reached max depth
+
             if current_depth >= max_depth:
                 return None
-            
-            # Check if this is a browser with root categories
+
             if hasattr(browser_or_item, 'instruments'):
-                # Check all main categories
-                categories = [
-                    browser_or_item.instruments,
-                    browser_or_item.sounds,
-                    browser_or_item.drums,
-                    browser_or_item.audio_effects,
-                    browser_or_item.midi_effects,
-                    browser_or_item.plugins,
+                category_names = [
+                    'instruments', 'sounds', 'drums', 'audio_effects', 'midi_effects',
+                    'plugins', 'samples', 'user_library', 'current_project', 'clips',
+                    'packs', 'max_for_live', 'user_folders',
                 ]
-                
+                categories = []
+                for name in category_names:
+                    if hasattr(browser_or_item, name):
+                        try:
+                            categories.append(getattr(browser_or_item, name))
+                        except Exception:
+                            pass
+
                 for category in categories:
                     item = self._find_browser_item_by_uri(category, uri, max_depth, current_depth + 1)
                     if item:
                         return item
-                
+
                 return None
-            
-            # Check if this item has children
-            if hasattr(browser_or_item, 'children') and browser_or_item.children:
-                for child in browser_or_item.children:
+
+            children = self._browser_children(browser_or_item)
+            if children:
+                for child in children:
                     item = self._find_browser_item_by_uri(child, uri, max_depth, current_depth + 1)
                     if item:
                         return item
-            
+
             return None
         except Exception as e:
             self.log_message("Error finding browser item by URI: {0}".format(str(e)))
