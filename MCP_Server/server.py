@@ -671,6 +671,36 @@ def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
         logger.error(f"Error loading instrument by URI: {str(e)}")
         return f"Error loading instrument by URI: {str(e)}"
 
+
+@mcp.tool()
+def load_sample_to_simpler(ctx: Context, track_index: int, uri: str, device_index: int = 0) -> str:
+    """
+    Load a browser sample item into a selected Simpler or onto a MIDI track.
+
+    Parameters:
+    - track_index: Track number (1-based).
+    - uri: Browser item URI for the sample (e.g. query:Samples#FileId_...).
+    - device_index: Existing Simpler device number (1-based). Use 0 to load onto the track.
+    """
+    try:
+        ableton = get_ableton_connection()
+        ti = _to_zero_based(track_index, "track_index")
+        di = _optional_to_zero_based(device_index, "device_index")
+        result = ableton.send_command("load_sample_to_simpler", {
+            "track_index": ti,
+            "item_uri": uri,
+            "device_index": di,
+        })
+        return "Loaded sample '{0}' to track {1}. Devices: {2}".format(
+            result.get("item_name", uri),
+            track_index,
+            ", ".join(result.get("devices_after", [])),
+        )
+    except Exception as e:
+        logger.error(f"Error loading sample to Simpler: {str(e)}")
+        return f"Error loading sample to Simpler: {str(e)}"
+
+
 @mcp.tool()
 def fire_clip(ctx: Context, track_index: int, clip_index: int) -> str:
     """

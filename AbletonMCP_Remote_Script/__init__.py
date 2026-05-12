@@ -59,6 +59,8 @@ VALID_COMMANDS = frozenset({
     "delete_track",
     "set_track_volume",
     "set_track_panning",
+    # B7 — sample loading
+    "load_sample_to_simpler",
 })
 
 def create_instance(c_instance):
@@ -432,6 +434,11 @@ class AbletonMCP(ControlSurface):
                             ci = params.get("chain_index", None)
                             direction = params.get("direction", "current")
                             result = self._navigate_preset(ti, di, ci, direction)
+                        elif command_type == "load_sample_to_simpler":
+                            ti = params.get("track_index", 0)
+                            item_uri = params.get("item_uri", "")
+                            di = params.get("device_index", None)
+                            result = self._load_sample_to_simpler(ti, item_uri, di)
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -859,6 +866,52 @@ class AbletonMCP(ControlSurface):
                 })
 
         self.schedule_message(0, _start_load)
+
+    # ----- Sample loading handlers (B7) -----
+
+    def _load_sample_to_simpler(self, track_index, item_uri, device_index=None):
+        """Load a browser sample item into selected Simpler or onto a MIDI track.
+
+        Live exposes Simpler.sample as read-only, so sample assignment must go
+        through Browser.load_item with the destination track/device selected.
+        """
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            app = self.application()
+            item = self._find_browser_item_by_uri(app.browser, item_uri)
+            if not item:
+                raise ValueError("Browser item with URI '{0}' not found".format(item_uri))
+            if hasattr(item, 'is_loadable') and not item.is_loadable:
+                raise ValueError("Browser item with URI '{0}' is not loadable".format(item_uri))
+
+            self._song.view.selected_track = track
+            selected_device_name = None
+            if device_index is not None:
+                if device_index < 0 or device_index >= len(track.devices):
+                    raise IndexError("Device index out of range")
+                device = track.devices[device_index]
+                selected_device_name = device.name
+                try:
+                    self._song.view.select_device(device)
+                except Exception as e:
+                    self.log_message("Could not select device before sample load: {0}".format(str(e)))
+
+            app.browser.load_item(item)
+            return {
+                "loaded": True,
+                "mode": "simpler_or_track",
+                "item_name": item.name,
+                "track_name": track.name,
+                "selected_device": selected_device_name,
+                "uri": item_uri,
+                "devices_after": [d.name for d in track.devices],
+            }
+        except Exception as e:
+            self.log_message("Error loading sample to Simpler/track: {0}".format(str(e)))
+            self.log_message(traceback.format_exc())
+            raise
 
     # Arrangement helper methods
 
