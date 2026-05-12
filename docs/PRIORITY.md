@@ -50,13 +50,15 @@ User-confirmed scope: **B1-B9 + F6** (defer B10-B12 to a later cycle).
 1. [x] B1 — `eof_newline_server_py` — **NO-OP** (already in upstream/main, verified `tail -c 1` is `\n`)
 2. [x] B2 — `ableton_host_port_env_vars` — commit `11554c4` (3 tests added, 146 total passing)
 3. [x] B3 — `valid_commands_registry` — commit `1cd14e0` (refactor + 4 tests, 150 total passing)
-4. [ ] B4 — F4 concurrency primitives
-5. [ ] B5 — `_browser_children` + `_search_browser_by_name`
-6. [ ] B6 — `_load_browser_item_with_retry`
-7. [ ] B7 — `load_sample_to_simpler`
-8. [ ] B8 — F1 Drum Rack pad family
-9. [ ] B9 — `_find_browser_item_by_uri` expansion
-10. [ ] F6 — Fork-only probes (separate commit, not pushed to upstream)
+4. [x] B4 — F4 concurrency primitives — commit `9c14c68` (+5 tests, 155 total)
+5. [x] B5 — `_browser_children` + `_search_browser_by_name` — commit `8863bbd` (+6 tests, 161 total)
+6. [x] B6 — `_load_browser_item_with_retry` + drum-rack predicates — commit `f99d439` (+9 tests, 170 total)
+7. [x] B7 — `load_sample_to_simpler` — commit `65b1b4e` (+4 tests, 180 total) [B9 ordering done early before B7]
+8. [x] B8 — F1 Drum Rack pad family — commit `7d948f2` (+8 tests, 188 total)
+9. [x] B9 — `_find_browser_item_by_uri` expansion — commit `db31fd6` (+6 tests, 176 total) [done before B7]
+10. [x] F6 — Fork-only probes — commit `57833ed` (+2 tests, 190 total)
+
+**Phase 3 complete: 10/10 commits. T3.8 atomic-test invariant: ALL commits independently green (190 passing at HEAD).**
 
 ### Deferred (post-confirmation)
 
