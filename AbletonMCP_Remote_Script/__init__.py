@@ -847,7 +847,7 @@ class AbletonMCP(ControlSurface):
                     break
             if target_pad is None:
                 raise ValueError("No Drum Rack pad with MIDI note {0}".format(pad_note))
-            if target_pad.chains and not replace:
+            if target_pad.chains and replace is not True:
                 raise ValueError("Pad note {0} already has chains; pass replace=True to replace".format(pad_note))
 
             pre_pad_count = len(target_pad.chains)
@@ -862,7 +862,7 @@ class AbletonMCP(ControlSurface):
                 rack.view.selected_drum_pad = target_pad
             except Exception as e:
                 self.log_message("Could not select pad: {0}".format(str(e)))
-            if replace and target_pad.chains:
+            if replace is True and target_pad.chains:
                 target_pad.delete_all_chains()
                 pre_pad_count = 0
 
@@ -1072,7 +1072,15 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _wait_for_load_complete(self, track_index, rack_device_index, pad_note, max_ticks=20):
-        """Poll a Drum Rack pad for a loaded chain after browser.load_item."""
+        """Poll a Drum Rack pad for a loaded chain after browser.load_item.
+
+        WARNING: this runs on Live's main thread (the command dispatcher
+        schedules handlers through schedule_message). The poll loop briefly
+        blocks the UI for up to max_ticks * 0.02s. Keep max_ticks small
+        (default 20 -> ~400 ms worst case). If the load truly needs longer,
+        prefer issuing a fresh verify_drum_pad_loaded later instead of a long
+        wait here.
+        """
         try:
             try:
                 max_ticks = int(max_ticks)
@@ -1086,7 +1094,7 @@ class AbletonMCP(ControlSurface):
                 last["ticks_waited"] = tick
                 if last.get("loaded"):
                     return last
-                time.sleep(0.05)
+                time.sleep(0.02)
             return last
         except Exception as e:
             self.log_message("Error waiting for Drum Rack pad load: {0}".format(str(e)))
