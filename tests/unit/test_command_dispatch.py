@@ -77,21 +77,44 @@ def test_valid_commands_rejects_unknown_command_names():
         assert bogus not in pkg.VALID_COMMANDS
 
 
-def test_every_dispatched_command_is_in_allowlist():
-    """Regression guard: every `command_type == "X"` branch in _process_command
-    must have a matching entry in VALID_COMMANDS, otherwise the allowlist
-    short-circuits dispatch and the command appears as 'Unknown command'.
+def test_main_thread_task_commands_are_in_allowlist():
+    """Regression guard: every `command_type == "X"` branch inside
+    `main_thread_task()` must have a matching VALID_COMMANDS entry.
+
+    _process_command dispatches mutating commands through the
+    `elif command_type in VALID_COMMANDS:` branch which schedules
+    main_thread_task. If a command is in main_thread_task body but missing
+    from the allowlist, it falls through to the next elif (or to
+    'Unknown command') instead of running on the main thread.
+
+    Read-only commands dispatched OUTSIDE main_thread_task (e.g.
+    `get_browser_tree`, `get_arrangement_info`) are intentionally NOT in
+    the allowlist — they are dispatched via specific elif cases AFTER
+    the `in VALID_COMMANDS` branch and rely on falling through. The
+    only exceptions are `get_session_info` and `get_track_info`, which
+    are dispatched BEFORE the allowlist branch and remain in the set
+    for completeness.
     """
     import pathlib
     import re
 
     pkg = _import_remote_script_module()
     source = pathlib.Path(pkg.__file__).read_text(encoding="utf-8")
-    pattern = re.compile(r'(?:if|elif)\s+command_type\s*==\s*"([a-z_][a-z0-9_]*)"')
-    dispatched = set(pattern.findall(source))
-    assert dispatched, "Failed to extract dispatch branches from source"
-    missing = sorted(dispatched - set(pkg.VALID_COMMANDS))
+
+    # Extract command_type matches inside the def main_thread_task() body.
+    body_match = re.search(
+        r"def main_thread_task\(\):(?P<body>.*?)response_queue\.put\(\s*\{\s*\"status\":\s*\"success\"",
+        source,
+        re.DOTALL,
+    )
+    assert body_match, "Failed to locate main_thread_task body"
+    pattern = re.compile(r'command_type\s*==\s*"([a-z_][a-z0-9_]*)"')
+    main_thread = set(pattern.findall(body_match.group("body")))
+    assert main_thread, "Failed to extract dispatch branches from main_thread_task body"
+
+    missing = sorted(main_thread - set(pkg.VALID_COMMANDS))
     assert not missing, (
-        "dispatched commands missing from VALID_COMMANDS allowlist: {0!r}. "
-        "Either add them to VALID_COMMANDS or remove the dispatch case.".format(missing)
+        "main_thread_task handlers missing from VALID_COMMANDS allowlist: {0!r}. "
+        "Add them to VALID_COMMANDS so the dispatcher routes them through the "
+        "main-thread scheduler.".format(missing)
     )
