@@ -3,7 +3,7 @@
 **Target repository**: [uisato/ableton-mcp-extended](https://github.com/uisato/ableton-mcp-extended)
 **Source branch**: [yxjxyyqqfx/ableton-mcp-extended:our-extensions](https://github.com/yxjxyyqqfx/ableton-mcp-extended/tree/our-extensions)
 **Branch parent**: `upstream/main @ 1116449`
-**Tests baseline**: 143 passing → 178 passing on the deepest PR-D stack (+44 new unit tests across all five PRs; one BUSY-path test for a removed private helper was dropped in the pre-submission review).
+**Tests baseline**: 143 passing → 181 passing on the deepest PR-D stack (+47 new unit tests across PR-A...PR-E + bug-fix tests for the B8 _find_actual_pad_note regression and a 12-command VALID_COMMANDS gap; one BUSY-path test for a removed private helper was dropped in the pre-submission review).
 
 All five PRs were validated against a real Ableton Live 12.3 session: socket connection at `host.docker.internal:9877`, full Drum Rack workflow create→load→verify→wait→replace, browser URI resolution from the expanded root list, and regression checks against pre-existing upstream commands (`get_session_info`, `get_track_info`, `create_midi_track`, `set_track_name`, `create_clip`, `add_notes_to_clip`, `set_clip_name`, `fire_clip`, `stop_clip`, `set_track_volume`, `set_track_panning`, `duplicate_clip_to_arrangement`, `delete_arrangement_clip`, `delete_track`, `get_device_parameters`, `load_instrument_or_effect`).
 
@@ -12,10 +12,11 @@ All five PRs were validated against a real Ableton Live 12.3 session: socket con
 | PR  | Branch (origin = `yxjxyyqqfx`)       | Tests pass | Δ vs baseline | Stacked on              |
 | --- | ------------------------------------ | ---------- | ------------- | ----------------------- |
 | A   | `pr/config-env-vars`                 | 146        | +3            | (independent)           |
-| B   | `pr/dispatch-and-load-foundation`    | 166        | +23           | (foundation)            |
-| C   | `pr/load-sample-to-simpler`          | 170        | +27           | PR-B                    |
-| D   | `pr/drum-rack-family`                | 178        | +35           | PR-C (which stacks B)   |
-| E   | `pr/find-browser-item-uri-expansion` | 172        | +29           | PR-B                    |
+| B   | `pr/dispatch-and-load-foundation`    | 169        | +26           | (foundation)            |
+| C   | `pr/load-sample-to-simpler`          | 173        | +30           | PR-B                    |
+| D   | `pr/drum-rack-family`                | 181        | +38           | PR-C (which stacks B)   |
+| E   | `pr/find-browser-item-uri-expansion` | 175        | +32           | PR-B                    |
+| X   | `pr/orphan-dispatches`               | 146        | +3            | (independent bug-fix)   |
 
 Each branch ends with a small `fix(remote): pre-submission review fixes ...` commit applying targeted hunks from the post-feature review (TOCTOU fix on `_get_load_lock`, removal of an unused private state-machine helper, strict-bool guards on `replace`, lowered poll cadence in `_wait_for_load_complete`, and **socket-timeout sync** for browser-load commands — required for end-to-end correctness against a real Live runtime).
 
