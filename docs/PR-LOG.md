@@ -20,6 +20,8 @@ Tracks the lifecycle of the five upstream PRs derived from the `our-extensions` 
 
 **T5.1 (PR-A) is always submitted via the web UI by the user** for tone calibration. Subsequent PRs may be agent-submitted via `gh pr create` after the maintainer's first signal validates the body style.
 
+**PR-X (orphan-dispatch bug-fix) is staged but gated on PR #24 signal** to avoid a spam-impression on a fresh account. Bug-fixes are normally not subject to the feature-pacing cooldown, but submitting two PRs in <24h from a freshly-created GitHub user can trigger maintainer skepticism. Once `uisato` reacts on PR #24 (any signal — comment, review, merge, close), PR-X submission is unblocked.
+
 ## Status table
 
 | PR  | Feature                              | Origin branch                        | Compare URL                                                                                                                                                | Submitted (UTC) | URL       | Last signal | State                                                |
@@ -29,6 +31,7 @@ Tracks the lifecycle of the five upstream PRs derived from the `our-extensions` 
 | C   | `load_sample_to_simpler`             | `pr/load-sample-to-simpler`          | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/load-sample-to-simpler)                         | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-B         |
 | D   | Drum Rack pad family                 | `pr/drum-rack-family`                | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/drum-rack-family)                               | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-C         |
 | E   | expanded URI search roots            | `pr/find-browser-item-uri-expansion` | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/find-browser-item-uri-expansion)                | (pending)       | (pending) | —           | branch pushed, body drafted, stacked on PR-B         |
+| X   | orphan-dispatch bug-fix              | `pr/orphan-dispatches`               | [compare](https://github.com/uisato/ableton-mcp-extended/compare/main...yxjxyyqqfx:ableton-mcp-extended:pr/orphan-dispatches)                              | (pending)       | (pending) | —           | branch pushed, body drafted, **gated on PR #24 signal** |
 
 ## T5.2 pacing timer
 
